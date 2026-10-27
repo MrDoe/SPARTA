@@ -356,8 +356,9 @@ void SourceBar::addObject (bool isReceiver)
 
     auto clamp = [&] (char axis, float maximum)
     {
-        const auto id = prefix + juce::String (newIndex)
-                      + juce::String::charToString ((juce_wchar) axis);
+        const auto id = prefix
+                      + juce::String::charToString ((juce_wchar) axis)
+                      + juce::String (newIndex);
         processor.setParameterValue (id, juce::jlimit (0.0f, maximum,
                                                        processor.getParameterFloat (id)));
     };

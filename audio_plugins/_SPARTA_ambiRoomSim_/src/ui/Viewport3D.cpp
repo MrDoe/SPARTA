@@ -79,8 +79,8 @@ float snapped (float value, bool snapEnabled, float step)
 juce::String positionParameterID (bool isReceiver, int index, char axis)
 {
     juce::String id (isReceiver ? "receiver" : "source");
-    id << index;
     id << juce::String::charToString ((juce_wchar) axis);
+    id << index;
     return id;
 }
 

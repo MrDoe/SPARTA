@@ -600,8 +600,8 @@ private:
     juce::String roomAxisParameterID (char axis) const
     {
         juce::String id (isReceiver ? "receiver" : "source");
-        id << index;
         id << juce::String::charToString ((juce_wchar) axis);
+        id << index;
         return id;
     }
 

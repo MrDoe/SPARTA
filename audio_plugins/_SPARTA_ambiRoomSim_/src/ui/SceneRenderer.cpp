@@ -1251,10 +1251,11 @@ bool SceneRenderer::getActorPosition (PluginProcessor& processor,
 {
     index = juce::jlimit (0, 15, index);
 
-    const juce::String id = (isReceiver ? "receiver" : "source") + juce::String (index);
-    position.x = processor.getParameterFloat (id + "X");
-    position.y = processor.getParameterFloat (id + "Y");
-    position.z = processor.getParameterFloat (id + "Z");
+    const juce::String prefix = isReceiver ? "receiver" : "source";
+    const juce::String suffix = juce::String (index);
+    position.x = processor.getParameterFloat (prefix + "X" + suffix);
+    position.y = processor.getParameterFloat (prefix + "Y" + suffix);
+    position.z = processor.getParameterFloat (prefix + "Z" + suffix);
 
     if (options.previewActive)
     {
