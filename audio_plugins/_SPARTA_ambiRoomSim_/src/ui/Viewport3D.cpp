@@ -528,6 +528,69 @@ void Viewport3D::mouseDoubleClick (const juce::MouseEvent& e)
         if (pickedNode.isCheckpoint())
         {
             setSelection (pickedNode, true);
+
+            /* Double-clicking a node opens a small editor for its time. */
+            bool isReceiver = false;
+            int objectIndex = 0;
+            int keyframeIndex = -1;
+            double start = 0.0;
+            double currentAbs = 0.0;
+            bool valid = false;
+            {
+                const juce::SpinLock::ScopedLockType sl (processor.getPathLock());
+                isReceiver = pickedNode.checkpointIsReceiver;
+                objectIndex = pickedNode.index;
+                keyframeIndex = pickedNode.keyframe;
+                PathData& path = isReceiver ? processor.getPathBank().getReceiverPath (objectIndex)
+                                            : processor.getPathBank().getSourcePath (objectIndex);
+                start = path.startTime;
+                if (keyframeIndex >= 0 && keyframeIndex < (int) path.keyframes.size())
+                {
+                    currentAbs = start + path.keyframes[(size_t) keyframeIndex].timeSeconds;
+                    valid = true;
+                }
+            }
+
+            if (valid)
+            {
+                auto* window = new juce::AlertWindow ("Edit checkpoint time",
+                                                       "Enter the absolute time (seconds) for this node.",
+                                                       juce::AlertWindow::QuestionIcon);
+                window->addTextEditor ("time", juce::String (currentAbs, 3), "Time (s):");
+                window->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+                window->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+
+                const bool isRec = isReceiver;
+                const int obj = objectIndex;
+                const int kf = keyframeIndex;
+                const double pathStart = start;
+
+                window->enterModalState (true, juce::ModalCallbackFunction::create (
+                    [this, isRec, obj, kf, pathStart, window] (int result)
+                    {
+                        if (result == 1)
+                        {
+                            const double entered = window->getTextEditorContents ("time").getDoubleValue();
+                            const double newRel = entered - pathStart;
+                            {
+                                const juce::SpinLock::ScopedLockType sl (processor.getPathLock());
+                                PathData& path = isRec ? processor.getPathBank().getReceiverPath (obj)
+                                                        : processor.getPathBank().getSourcePath (obj);
+                                if (kf >= 0 && kf < (int) path.keyframes.size())
+                                {
+                                    path.keyframes[(size_t) kf].timeSeconds = juce::jmax (0.0, newRel);
+                                    path.recomputeDefaultTangent (kf);
+                                    processor.markPathDirty (false);
+                                }
+                            }
+                            notifyPathEdited();
+                        }
+                        delete window;
+                    }), true);
+
+                return;
+            }
+
             frameSelection();
             return;
         }
