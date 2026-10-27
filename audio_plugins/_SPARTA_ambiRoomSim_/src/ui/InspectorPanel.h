@@ -33,6 +33,12 @@
 class InspectorPanel : public juce::Component
 {
 public:
+    enum class Tab
+    {
+        inspector,
+        motion
+    };
+
     explicit InspectorPanel (PluginProcessor& processor);
     ~InspectorPanel() override;
 
@@ -58,6 +64,9 @@ private:
 
     PluginProcessor& processor;
     studio::Selection selection;
+    Tab activeTab = Tab::inspector;
+    juce::TextButton inspectorTabButton { "Inspector" };
+    juce::TextButton motionTabButton { "Motion" };
     juce::Viewport viewport;
     std::unique_ptr<Content> content;
 

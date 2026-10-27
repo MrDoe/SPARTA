@@ -105,11 +105,13 @@ namespace
    changes, which keeps the parameter attachments and the actor controls in
    sync without a wall of manual show/hide logic.
    --------------------------------------------------------------------------- */
-class InspectorPanel::Content : public juce::Component
+class InspectorPanel::Content : public juce::Component,
+                                public juce::TableListBoxModel
 {
 public:
-    Content (PluginProcessor& p, const studio::Selection& sel)
-        : processor (p), selection (sel)
+    Content (PluginProcessor& p, const studio::Selection& sel,
+            InspectorPanel::Tab tabToUse)
+        : processor (p), selection (sel), tab (tabToUse)
     {
         setOpaque (true);
 
@@ -119,25 +121,39 @@ public:
                                   : selection.isReceiver();
         index = juce::jlimit (0, studio::maxSceneObjects - 1, selection.index);
 
-        buildRoomSection();
-        buildMaterialsSection();
+        hasPathSection = (tab == InspectorPanel::Tab::motion && hasObject);
 
-        if (hasObject)
+        if (tab == InspectorPanel::Tab::inspector)
         {
-            buildActorSection();
-            buildPathSection();
-            if (isCheckpoint)
-                buildCheckpointSection();
+            buildRoomSection();
+            buildMaterialsSection();
+
+            if (hasObject)
+                buildActorSection();
+            else
+            {
+                addSection ("Object");
+                addNote ("No object selected. Click a source or listener in the "
+                         "canvas, or pick one from the source bar.");
+            }
+
+            buildCanvasSection();
+            buildOutputSection();
         }
         else
         {
-            addSection ("Object");
-            addNote ("No object selected. Click a source or listener in the "
-                     "canvas, or pick one from the source bar.");
+            if (hasObject)
+            {
+                buildPathSection();
+                if (isCheckpoint)
+                    buildCheckpointSection();
+            }
+            else
+            {
+                addSection ("Motion path");
+                addNote ("Select a source or listener to edit its motion path.");
+            }
         }
-
-        buildCanvasSection();
-        buildOutputSection();
     }
 
     ~Content() override = default;
@@ -258,6 +274,9 @@ public:
         if (! hasObject)
             return;
 
+        if (! hasPathSection)
+            return;
+
         const bool isPpq = processor.isTimeInPpq();
 
         size_t numKeyframes = 0;
@@ -329,6 +348,9 @@ public:
 
             checkpointTimeValue->setText (timeText, juce::dontSendNotification);
         }
+
+        if (nodeTable != nullptr)
+            nodeTable->updateContent();
     }
 
     std::function<void()> onEdited;
@@ -361,6 +383,8 @@ private:
 
     PluginProcessor& processor;
     studio::Selection selection;
+    InspectorPanel::Tab tab = InspectorPanel::Tab::inspector;
+    bool hasPathSection = false;
 
     bool isCheckpoint = false;
     bool hasObject = false;
@@ -389,6 +413,7 @@ private:
     juce::Slider scaleSlider;
 
     /* Path controls. */
+    std::unique_ptr<juce::TableListBox> nodeTable;
     juce::ToggleButton pathEnabledToggle;
     juce::ToggleButton pathLoopToggle;
     juce::Slider pathStartSlider;
@@ -920,6 +945,23 @@ private:
         };
         addControl ("", clearPathButton, 0, 30);
 
+        nodeTable = std::make_unique<juce::TableListBox> ("nodes", this);
+        nodeTable->setRowHeight (18);
+        nodeTable->setHeaderHeight (16);
+        nodeTable->getHeader().addColumn ("#", 1, 28);
+        nodeTable->getHeader().addColumn ("Time", 2, 62);
+        nodeTable->getHeader().addColumn ("X", 3, 46);
+        nodeTable->getHeader().addColumn ("Y", 4, 46);
+        nodeTable->getHeader().addColumn ("Z", 5, 46);
+        nodeTable->getHeader().addColumn ("Stop", 6, 50);
+        nodeTable->getHeader().setStretchToFitActive (true);
+        nodeTable->setClickingTogglesRowSelection (true);
+        addAndMakeVisible (*nodeTable);
+        addControl ("Nodes", *nodeTable, 0, 180);
+
+        if (selection.isCheckpoint())
+            nodeTable->selectRow (selection.keyframe, juce::dontSendNotification);
+
         if (count == 0)
             addNote ("Draw a spline in the canvas with the Draw Spline tool, "
                      "or generate a primitive from the tool rail.");
@@ -1192,6 +1234,81 @@ private:
                  "to the encoded ambisonic bus.");
     }
 
+    /* TableListBoxModel for the all-nodes table. */
+    int getNumRows() override
+    {
+        if (! hasObject)
+            return 0;
+
+        const juce::SpinLock::ScopedLockType sl (processor.getPathLock());
+        return (int) currentPath().keyframes.size();
+    }
+
+    void paintRowBackground (juce::Graphics& g, int rowNumber, int /*width*/,
+                             int /*height*/, bool rowIsSelected) override
+    {
+        if (rowIsSelected)
+            g.fillAll (studio::Colours::accentDim);
+        else if (rowNumber % 2 == 0)
+            g.fillAll (studio::Colours::surface);
+        else
+            g.fillAll (studio::Colours::panel);
+    }
+
+    void paintCell (juce::Graphics& g, int rowNumber, int columnId,
+                    int width, int height, bool /*rowIsSelected*/) override
+    {
+        const juce::SpinLock::ScopedLockType sl (processor.getPathLock());
+        const PathData& path = currentPath();
+        if (rowNumber < 0 || rowNumber >= (int) path.keyframes.size())
+            return;
+
+        const auto& kf = path.keyframes[(size_t) rowNumber];
+
+        juce::String text;
+        if (columnId == 1)
+            text = juce::String (rowNumber + 1);
+        else if (columnId == 2)
+            text = juce::String (kf.timeSeconds, 2);
+        else if (columnId == 3)
+            text = juce::String (kf.x, 2);
+        else if (columnId == 4)
+            text = juce::String (kf.y, 2);
+        else if (columnId == 5)
+            text = juce::String (kf.z, 2);
+        else if (columnId == 6)
+            text = juce::String (kf.stopTime, 2);
+
+        g.setColour (studio::Colours::text);
+        g.setFont (studio::uiFont (10.5f));
+        g.drawText (text, 4, 0, width - 8, height,
+                    juce::Justification::centredLeft, true);
+    }
+
+    juce::Component* refreshComponentForCell (int /*rowNumber*/, int /*columnId*/,
+                                            bool /*isRowSelected*/,
+                                            juce::Component* existingComponentToUpdate) override
+    {
+        /* Read-only table: no inline editors. */
+        delete existingComponentToUpdate;
+        return nullptr;
+    }
+
+    void selectedRowsChanged (int lastRowSelected) override
+    {
+        if (! hasObject || lastRowSelected < 0)
+            return;
+
+        const juce::SpinLock::ScopedLockType sl (processor.getPathLock());
+        const PathData& path = currentPath();
+        if (lastRowSelected >= (int) path.keyframes.size())
+            return;
+
+        if (onSelectionRequested)
+            onSelectionRequested (studio::Selection::checkpoint (isReceiver, index,
+                                                                lastRowSelected));
+    }
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Content)
 };
 
@@ -1201,6 +1318,29 @@ InspectorPanel::InspectorPanel (PluginProcessor& p)
     : processor (p)
 {
     setOpaque (true);
+
+    inspectorTabButton.setClickingTogglesState (true);
+    motionTabButton.setClickingTogglesState (true);
+    inspectorTabButton.setToggleState (true, juce::dontSendNotification);
+
+    inspectorTabButton.onClick = [this]
+    {
+        activeTab = Tab::inspector;
+        inspectorTabButton.setToggleState (true, juce::dontSendNotification);
+        motionTabButton.setToggleState (false, juce::dontSendNotification);
+        rebuild();
+    };
+
+    motionTabButton.onClick = [this]
+    {
+        activeTab = Tab::motion;
+        inspectorTabButton.setToggleState (false, juce::dontSendNotification);
+        motionTabButton.setToggleState (true, juce::dontSendNotification);
+        rebuild();
+    };
+
+    addAndMakeVisible (inspectorTabButton);
+    addAndMakeVisible (motionTabButton);
 
     viewport.setScrollBarsShown (true, false);
     viewport.setScrollBarThickness (9);
@@ -1240,6 +1380,12 @@ void InspectorPanel::resized()
 {
     auto area = getLocalBounds();
     area.removeFromTop (headerHeight);
+
+    auto tabArea = area.removeFromTop (28);
+    const int tabWidth = juce::jmax (60, tabArea.getWidth() / 2);
+    inspectorTabButton.setBounds (tabArea.removeFromLeft (tabWidth).reduced (4, 3));
+    motionTabButton.setBounds (tabArea.reduced (4, 3));
+
     viewport.setBounds (area);
 
     if (content != nullptr)
@@ -1271,7 +1417,7 @@ void InspectorPanel::rebuild()
     content.reset();
     viewport.setViewedComponent (nullptr, false);
 
-    content = std::make_unique<Content> (processor, selection);
+    content = std::make_unique<Content> (processor, selection, activeTab);
     content->onEdited = [this]
     {
         repaint();

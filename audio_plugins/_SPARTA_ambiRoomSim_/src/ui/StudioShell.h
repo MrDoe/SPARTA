@@ -76,17 +76,19 @@ private:
     juce::FilenameComponent trackChooser { "Track", juce::File(), true, false,
                                            false, "*.wav;*.aiff;*.aif;*.mp3",
                                            juce::String(), "Load track file..." };
-    juce::ToggleButton previewToggle { "Preview" };
+
     studio::IconButton focusButton { studio::Icon::focus,
                                      "Focus mode: hide the inspector and docks" };
     studio::IconButton fullscreenButton { studio::Icon::fullscreen,
                                           "Toggle fullscreen" };
     studio::IconButton settingsButton { studio::Icon::settings,
                                         "Studio settings" };
+#if JucePlugin_Build_Standalone
     studio::IconButton playButton { studio::Icon::play,
                                     "Play: animate actors along their paths" };
     studio::IconButton stopButton { studio::Icon::stop,
                                     "Stop and reset the path preview" };
+#endif
 
     juce::OwnedArray<juce::Button> railButtons;
     juce::Button* primitivesButton = nullptr;
@@ -98,7 +100,9 @@ private:
     double previewTime = 0.0;
     bool previewActive = false;
     bool manualPreview = false;
+#if JucePlugin_Build_Standalone
     bool internalPlaying = false;
+#endif
     bool focusMode = false;
     bool inspectorVisible = true;
     bool timelineVisible = true;

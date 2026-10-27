@@ -141,16 +141,6 @@ StudioShell::StudioShell (PluginProcessor& p)
         trackChooser.setCurrentFile (juce::File (savedTrack.filePath), false,
                                      juce::dontSendNotification);
 
-    previewToggle.setTooltip ("Show the objects at the previewed timeline "
-                              "position instead of their live position (P).");
-    previewToggle.onClick = [this]
-    {
-        const double time = previewTime > 0.0 ? previewTime
-                                              : processor.getCurrentHostTime();
-        setPreview (time, previewToggle.getToggleState(), true);
-    };
-    addAndMakeVisible (previewToggle);
-
     focusButton.onClick = [this]
     {
         setFocusMode (! focusMode);
@@ -164,6 +154,7 @@ StudioShell::StudioShell (PluginProcessor& p)
     settingsButton.onClick = [this] { showSettingsMenu(); };
     addAndMakeVisible (settingsButton);
 
+#if JucePlugin_Build_Standalone
     playButton.setToggleState (false, juce::dontSendNotification);
     playButton.onClick = [this]
     {
@@ -191,6 +182,7 @@ StudioShell::StudioShell (PluginProcessor& p)
         manualPreview = false;
     };
     addAndMakeVisible (stopButton);
+#endif
 
     buildRail();
 
@@ -451,16 +443,18 @@ void StudioShell::resized()
                                 topBarArea.getY() + 9, 30, 30);
     focusButton.setBounds (fullscreenButton.getX() - 6 - 30,
                            topBarArea.getY() + 9, 30, 30);
-    previewToggle.setBounds (focusButton.getX() - 10 - 96,
-                             topBarArea.getY() + 13, 96, 22);
-
-    playButton.setBounds (previewToggle.getX() - 6 - 30,
+#if JucePlugin_Build_Standalone
+    playButton.setBounds (focusButton.getX() - 6 - 30,
                           topBarArea.getY() + 9, 30, 30);
     stopButton.setBounds (playButton.getX() - 6 - 30,
                          topBarArea.getY() + 9, 30, 30);
 
     timeArea = { stopButton.getX() - 138, topBarArea.getY(),
                  126, topBarHeight };
+#else
+    timeArea = { previewToggle.getX() - 138, topBarArea.getY(),
+                 126, topBarHeight };
+#endif
     brandArea = { 12, topBarArea.getY(), 262, topBarHeight };
     summaryArea = { brandArea.getRight() + 6, topBarArea.getY(),
                     juce::jmax (0, timeArea.getX() - brandArea.getRight() - 18),
@@ -688,7 +682,6 @@ void StudioShell::setPreview (double time, bool active, bool manual)
     if (manual)
         manualPreview = active;
 
-    previewToggle.setToggleState (previewActive, juce::dontSendNotification);
     viewport.setPreviewTime (previewTime, previewActive);
     timeline->setPreviewTime (previewTime, previewActive);
 
@@ -960,12 +953,14 @@ void StudioShell::timerCallback()
 
     const double now = processor.getCurrentHostTime();
 
+#if JucePlugin_Build_Standalone
     /* Plugin-internal preview playback: advance the playhead at 1x. */
     if (internalPlaying)
     {
         previewTime += 0.08;
         setPreview (previewTime, true, false);
     }
+#endif
 
     /* Follow host transport when it is running and the user is not
        manually scrubbing/previewing. */
