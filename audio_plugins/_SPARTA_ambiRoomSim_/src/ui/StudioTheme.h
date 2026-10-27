@@ -151,7 +151,7 @@ inline void drawChip (juce::Graphics& g, juce::Rectangle<float> r,
 enum class Icon
 {
     cursor, plus, bezier, shapes, orbit, fly, settings, help,
-    fullscreen, focus, chevronDown, chevronRight, play, pause, loop,
+    fullscreen, focus, chevronDown, chevronRight, play, pause, stop, loop,
     magnet, eye, lock, listener, source, trash, close
 };
 
@@ -254,6 +254,10 @@ inline juce::Path makeIcon (Icon icon, float size)
         case Icon::pause:
             p.addRectangle (7.0f, 5.0f, 3.5f, 14.0f);
             p.addRectangle (13.5f, 5.0f, 3.5f, 14.0f);
+            break;
+
+        case Icon::stop:
+            p.addRectangle (6.0f, 6.0f, 12.0f, 12.0f);
             break;
 
         case Icon::loop:

@@ -83,6 +83,10 @@ private:
                                           "Toggle fullscreen" };
     studio::IconButton settingsButton { studio::Icon::settings,
                                         "Studio settings" };
+    studio::IconButton playButton { studio::Icon::play,
+                                    "Play: animate actors along their paths" };
+    studio::IconButton stopButton { studio::Icon::stop,
+                                    "Stop and reset the path preview" };
 
     juce::OwnedArray<juce::Button> railButtons;
     juce::Button* primitivesButton = nullptr;
@@ -93,6 +97,8 @@ private:
 
     double previewTime = 0.0;
     bool previewActive = false;
+    bool manualPreview = false;
+    bool internalPlaying = false;
     bool focusMode = false;
     bool inspectorVisible = true;
     bool timelineVisible = true;
@@ -120,7 +126,7 @@ private:
     void updateRailSelection();
     void applySelection (const studio::Selection& newSelection,
                          bool updateViewport);
-    void setPreview (double time, bool active);
+    void setPreview (double time, bool active, bool manual = false);
     void syncRenderOptions();
     void updateWarning();
     void toggleFullscreen();

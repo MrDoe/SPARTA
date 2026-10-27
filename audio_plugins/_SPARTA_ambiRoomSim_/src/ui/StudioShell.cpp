@@ -119,7 +119,7 @@ StudioShell::StudioShell (PluginProcessor& p)
 
     timeline = std::make_unique<pathTimelineView> (p);
     addAndMakeVisible (timeline.get());
-    timeline->onPreviewRequested = [this] (double t) { setPreview (t, true); };
+    timeline->onPreviewRequested = [this] (double t) { setPreview (t, true, true); };
     timeline->onSelectionChanged = [this] (studio::Selection newSelection)
     {
         applySelection (newSelection, true);
@@ -147,7 +147,7 @@ StudioShell::StudioShell (PluginProcessor& p)
     {
         const double time = previewTime > 0.0 ? previewTime
                                               : processor.getCurrentHostTime();
-        setPreview (time, previewToggle.getToggleState());
+        setPreview (time, previewToggle.getToggleState(), true);
     };
     addAndMakeVisible (previewToggle);
 
@@ -163,6 +163,34 @@ StudioShell::StudioShell (PluginProcessor& p)
 
     settingsButton.onClick = [this] { showSettingsMenu(); };
     addAndMakeVisible (settingsButton);
+
+    playButton.setToggleState (false, juce::dontSendNotification);
+    playButton.onClick = [this]
+    {
+        if (internalPlaying)
+        {
+            internalPlaying = false;
+            playButton.setToggleState (false, juce::dontSendNotification);
+        }
+        else
+        {
+            internalPlaying = true;
+            playButton.setToggleState (true, juce::dontSendNotification);
+            if (previewTime <= 0.0)
+                previewTime = processor.getCurrentHostTime();
+            setPreview (previewTime, true, true);
+        }
+    };
+    addAndMakeVisible (playButton);
+
+    stopButton.onClick = [this]
+    {
+        internalPlaying = false;
+        playButton.setToggleState (false, juce::dontSendNotification);
+        setPreview (0.0, false, true);
+        manualPreview = false;
+    };
+    addAndMakeVisible (stopButton);
 
     buildRail();
 
@@ -426,7 +454,12 @@ void StudioShell::resized()
     previewToggle.setBounds (focusButton.getX() - 10 - 96,
                              topBarArea.getY() + 13, 96, 22);
 
-    timeArea = { previewToggle.getX() - 138, topBarArea.getY(),
+    playButton.setBounds (previewToggle.getX() - 6 - 30,
+                          topBarArea.getY() + 9, 30, 30);
+    stopButton.setBounds (playButton.getX() - 6 - 30,
+                         topBarArea.getY() + 9, 30, 30);
+
+    timeArea = { stopButton.getX() - 138, topBarArea.getY(),
                  126, topBarHeight };
     brandArea = { 12, topBarArea.getY(), 262, topBarHeight };
     summaryArea = { brandArea.getRight() + 6, topBarArea.getY(),
@@ -524,7 +557,7 @@ bool StudioShell::keyPressed (const juce::KeyPress& key)
     {
         setPreview (previewTime > 0.0 ? previewTime
                                       : processor.getCurrentHostTime(),
-                    ! previewActive);
+                    ! previewActive, true);
         return true;
     }
 
@@ -648,15 +681,18 @@ void StudioShell::applySelection (const studio::Selection& newSelection,
     repaint (topBarArea);
 }
 
-void StudioShell::setPreview (double time, bool active)
+void StudioShell::setPreview (double time, bool active, bool manual)
 {
     previewTime = time;
     previewActive = active;
+    if (manual)
+        manualPreview = active;
 
     previewToggle.setToggleState (previewActive, juce::dontSendNotification);
     viewport.setPreviewTime (previewTime, previewActive);
     timeline->setPreviewTime (previewTime, previewActive);
 
+    viewport.refresh();
     repaint (topBarArea);
     repaint (timelineHeaderArea);
 }
@@ -923,6 +959,28 @@ void StudioShell::timerCallback()
     updateWarning();
 
     const double now = processor.getCurrentHostTime();
+
+    /* Plugin-internal preview playback: advance the playhead at 1x. */
+    if (internalPlaying)
+    {
+        previewTime += 0.08;
+        setPreview (previewTime, true, false);
+    }
+
+    /* Follow host transport when it is running and the user is not
+       manually scrubbing/previewing. */
+    if (processor.isHostPlaying())
+    {
+        manualPreview = false;
+        setPreview (now, true, false);
+    }
+    else if (! processor.isHostPlaying() && ! manualPreview && previewActive
+             && ! internalPlaying)
+    {
+        /* Host stopped and we were auto-following: revert to base poses. */
+        setPreview (now, false, false);
+    }
+
     if (timeline != nullptr)
         timeline->setScrubTime (now);
 
@@ -930,6 +988,10 @@ void StudioShell::timerCallback()
     sourceBar.refresh();
     syncRenderOptions();
     refreshSummary();
+
+    /* Keep the canvas alive while a path is being animated. */
+    if (previewActive || processor.isHostPlaying() || internalPlaying)
+        viewport.refresh();
 
     repaint (timeArea);
     repaint (topBarArea);

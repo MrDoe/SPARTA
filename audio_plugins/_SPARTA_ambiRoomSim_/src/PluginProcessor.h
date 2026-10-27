@@ -1,22 +1,22 @@
 /*
  ==============================================================================
- 
+
  This file is part of SPARTA; a suite of spatial audio plug-ins.
  Copyright (c) 2018 - Leo McCormack.
- 
+
  SPARTA is free software: you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
  the Free Software Foundation, either version 3 of the License, or
  (at your option) any later version.
- 
+
  SPARTA is distributed in the hope that it will be useful,
  but WITHOUT ANY WARRANTY; without even the implied warranty of
  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  GNU General Public License for more details.
- 
+
  You should have received a copy of the GNU General Public License
  along with SPARTA.  If not, see <http://www.gnu.org/licenses/>.
- 
+
  ==============================================================================
 */
 
@@ -78,14 +78,14 @@ public:
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
-    
+
     /* PluginEditor */
     juce::AudioProcessorEditor* createEditor() override;
-    
+
     /* Get functions */
     void* getFXHandle() { return hAmbi; }
-    
-    /* For refreshing window during automation */ 
+
+    /* For refreshing window during automation */
     void setRefreshWindow(bool newState) { refreshWindow = newState; }
     bool getRefreshWindow() { return refreshWindow; }
 
@@ -117,6 +117,7 @@ public:
         pathEditCounter.fetch_add(1, std::memory_order_release);
     }
     double getCurrentHostTime() const { return currentHostTime.load(); }
+    bool isHostPlaying() const { return hostPlaying.load(); }
 
     /* Scene metadata (actor casting, names, markers, view preferences).
        Purely visual: the audio thread never touches it. The version guard
@@ -172,11 +173,11 @@ public:
     bool isTrackLoading() const { return trackLoading.load(); }
     void loadTrackFile(const juce::File& file);
     void clearTrackFile();
-    
+
     /* Hide internal setParameterValue when automation is pushing (to suppress parameterChanged re-entry) */
     void setApplyingFromAutomation(bool v) { applyingFromAutomation.store(v); }
     bool isApplyingFromAutomation() const { return applyingFromAutomation.load(); }
-    
+
 private:
     void* hAmbi;                       /* ambi_roomsim handle */
     bool refreshWindow;
@@ -198,6 +199,7 @@ private:
     PathBank pathSnapshot;
     uint32_t pathSnapshotCounter = 0;    /* audio thread only */
     mutable std::atomic<double> currentHostTime{0.0};
+    mutable std::atomic<bool> hostPlaying{false};
     mutable std::atomic<double> maxHostTime{0.0};
     std::atomic<bool> applyingFromAutomation{false};
     double lastWaveHostTime = 0.0;
@@ -251,7 +253,7 @@ private:
     /* Diagnostic: traces path-bank serialization to a file when the
        SPARTA_AMB_ROOMSIM_STATE_LOG env var points at a log path. */
     void logPathState(const char* where) const;
-    
+
     /* For syncing parameter values between the JUCE parameter tree and the internal DSP object */
     void setParameterValuesUsingInternalState();
     void setInternalStateUsingParameterValues();

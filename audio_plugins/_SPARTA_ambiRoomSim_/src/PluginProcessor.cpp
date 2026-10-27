@@ -1,22 +1,22 @@
 /*
  ==============================================================================
- 
+
  This file is part of SPARTA; a suite of spatial audio plug-ins.
  Copyright (c) 2018 - Leo McCormack.
- 
+
  SPARTA is free software: you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
  the Free Software Foundation, either version 3 of the License, or
  (at your option) any later version.
- 
+
  SPARTA is distributed in the hope that it will be useful,
  but WITHOUT ANY WARRANTY; without even the implied warranty of
  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  GNU General Public License for more details.
- 
+
  You should have received a copy of the GNU General Public License
  along with SPARTA.  If not, see <http://www.gnu.org/licenses/>.
- 
+
  ==============================================================================
 */
 
@@ -74,7 +74,7 @@ void PluginProcessor::logPathState(const char* where) const
 static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
-    
+
     params.push_back(std::make_unique<juce::AudioParameterChoice>("outputOrder", "OutputOrder",
                                                                   juce::StringArray{"1st order","2nd order","3rd order","4th order","5th order","6th order","7th order","8th order","9th order","10th order"}, 2,
                                                                   AudioParameterChoiceAttributes().withAutomatable(false)));
@@ -115,7 +115,7 @@ static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
         params.push_back(std::make_unique<juce::AudioParameterFloat>("sourceY" + juce::String(i), "SourceY_" + juce::String(i+1), juce::NormalisableRange<float>(0.0f, 20.0f, 0.01f), ambi_roomsim_defaultSourcePositions[i][1], AudioParameterFloatAttributes().withLabel("m")));
         params.push_back(std::make_unique<juce::AudioParameterFloat>("sourceZ" + juce::String(i), "SourceZ_" + juce::String(i+1), juce::NormalisableRange<float>(0.0f, 6.0f, 0.01f), ambi_roomsim_defaultSourcePositions[i][2], AudioParameterFloatAttributes().withLabel("m")));
     }
-    
+
     for(int i=0; i<ROOM_SIM_MAX_NUM_RECEIVERS; i++){
         params.push_back(std::make_unique<juce::AudioParameterFloat>("receiverX" + juce::String(i), "ReceiverX_" + juce::String(i+1), juce::NormalisableRange<float>(0.0f, 20.0f, 0.01f), ambi_roomsim_defaultReceiverPositions[i][0], AudioParameterFloatAttributes().withLabel("m")));
         params.push_back(std::make_unique<juce::AudioParameterFloat>("receiverY" + juce::String(i), "ReceiverY_" + juce::String(i+1), juce::NormalisableRange<float>(0.0f, 20.0f, 0.01f), ambi_roomsim_defaultReceiverPositions[i][1], AudioParameterFloatAttributes().withLabel("m")));
@@ -168,7 +168,7 @@ void PluginProcessor::parameterChanged(const juce::String& parameterID, float ne
     }
     else if(parameterID == "roomZ"){
         ambi_roomsim_setRoomDimZ(hAmbi, newValue);
-    } 
+    }
     else if(parameterID == "numSources"){
         ambi_roomsim_setNumSources(hAmbi, static_cast<int>(newValue));
     }
@@ -292,7 +292,7 @@ PluginProcessor::PluginProcessor()
 {
     ambi_roomsim_create(&hAmbi);
     addParameterListeners(this);
-    
+
     trackFormatManager.registerBasicFormats();
     cachePositionParameters();
     /* Reserve the keyframe buffers of both the live bank and the snapshot
@@ -339,7 +339,7 @@ void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 
     ambi_roomsim_init(hAmbi, nSampleRate);
     AudioProcessor::setLatencySamples(ambi_roomsim_getProcessingDelay());
-    
+
     waveformCapture.prepare(nSampleRate);
     /* The scratch buffer for the mono mix is a little larger than the
        announced block size, so that a host that hands us a bigger block
@@ -363,6 +363,7 @@ void PluginProcessor::processBlock (AudioSampleBuffer& buffer, MidiBuffer& /*mid
             t = (getParameterChoice("pathTimeMode") == 0)
                     ? pos->getTimeInSeconds().orFallback(0.0)
                     : pos->getPpqPosition().orFallback(0.0);
+            hostPlaying.store (pos->getIsPlaying());
         }
     }
     t += getParameterFloat("pathTimeOffset");
@@ -547,14 +548,14 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
                 ambi_roomsim_setNumSources(hAmbi, xmlState->getIntAttribute("nSources", 1));
             if(xmlState->hasAttribute("nReceivers"))
                 ambi_roomsim_setNumReceivers(hAmbi, xmlState->getIntAttribute("nReceivers", 1));
-            
+
             if(xmlState->hasAttribute("NORM"))
                 ambi_roomsim_setNormType(hAmbi, xmlState->getIntAttribute("NORM", 1));
             if(xmlState->hasAttribute("CHORDER"))
                 ambi_roomsim_setChOrder(hAmbi, xmlState->getIntAttribute("CHORDER", 1));
             if(xmlState->hasAttribute("OUT_ORDER"))
                 ambi_roomsim_setOutputOrder(hAmbi, xmlState->getIntAttribute("OUT_ORDER", 1));
-            
+
             setParameterValuesUsingInternalState();
         }
         else if (xmlState->getIntAttribute("VersionCode")>=0x10101){
@@ -610,7 +611,7 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
             }
             parameters.replaceState(state);
             addParameterListeners(this);
-            
+
             /* Many hosts will also trigger parameterChanged() for all parameters after calling setStateInformation() */
             /* However, some hosts do not. Therefore, it is better to ensure that the internal state is always up-to-date by calling: */
             setInternalStateUsingParameterValues();
@@ -673,7 +674,7 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
         juce::String trackPath = xmlState->getStringAttribute("TrackFilePath", "");
         if (trackPath.isNotEmpty())
             loadTrackFile(juce::File(trackPath));
-    
+
         ambi_roomsim_refreshParams(hAmbi);
     }
 }
