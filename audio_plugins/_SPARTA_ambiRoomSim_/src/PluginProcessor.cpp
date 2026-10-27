@@ -473,10 +473,12 @@ AudioProcessorEditor* PluginProcessor::createEditor()
 void PluginProcessor::getStateInformation (MemoryBlock& destData)
 {
     juce::ValueTree state = parameters.copyState();
-    /* Remove any PATHS children that may have leaked into the parameter tree
-       from an earlier setStateInformation (see setStateInformation). */
+    /* Remove any PATHS/SCENE children that may have leaked into the
+       parameter tree from an earlier setStateInformation (see below). */
     while (state.getChildWithName("PATHS").isValid())
         state.removeChild(state.getChildWithName("PATHS"), nullptr);
+    while (state.getChildWithName("SCENE").isValid())
+        state.removeChild(state.getChildWithName("SCENE"), nullptr);
 
     /* The audio thread copies pathBank into pathSnapshot under pathLock, so
        the live bank must be serialized under the same lock to avoid a data
@@ -485,6 +487,12 @@ void PluginProcessor::getStateInformation (MemoryBlock& destData)
         const juce::SpinLock::ScopedLockType sl(pathLock);
         state.addChild(pathBank.toValueTree(pathStateVersion.load()), -1, nullptr);
         logPathState("save");
+    }
+
+    /* Scene casting / markers / view preferences. */
+    {
+        const juce::ScopedLock sl(sceneLock);
+        state.addChild(sceneModel.toValueTree(sceneStateVersion.load()), -1, nullptr);
     }
 
     std::unique_ptr<juce::XmlElement> xmlState(state.createXml());
@@ -572,7 +580,25 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
                            > (int)incomingPaths.getProperty("version", 0))
                     incomingPaths = child;
             }
-            state.removeChild(incomingPaths, nullptr);
+            /* Remove every stacked PATHS node, not just the one we keep:
+               none of them may end up in the parameter tree below. */
+            while (state.getChildWithName("PATHS").isValid())
+                state.removeChild(state.getChildWithName("PATHS"), nullptr);
+
+            /* Scene metadata is UI-only and lives outside the parameter tree
+               for the same reason as PATHS. Remove every stacked SCENE node
+               and keep the newest one. */
+            juce::ValueTree incomingScene;
+            for (int i = 0; i < state.getNumChildren(); ++i) {
+                auto child = state.getChild(i);
+                if (!child.hasType("SCENE")) continue;
+                if (!incomingScene.isValid()
+                    || (int)child.getProperty("version", 0)
+                           > (int)incomingScene.getProperty("version", 0))
+                    incomingScene = child;
+            }
+            while (state.getChildWithName("SCENE").isValid())
+                state.removeChild(state.getChildWithName("SCENE"), nullptr);
             // Strip legacy dead params (pathEnable / pathLoop) removed in fix
             for (int i = state.getNumChildren(); i-- > 0; ) {
                 auto c = state.getChild(i);
@@ -626,6 +652,18 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
                    host dirty right after a restore. */
                 if (applied)
                     refreshPathSnapshot();
+            }
+
+            /* Restore scene casting / markers / view preferences. The same
+               monotonic version guard as PATHS keeps a stale host snapshot
+               (undo/template) from overwriting newer edits. */
+            if (incomingScene.isValid()) {
+                const juce::ScopedLock sl(sceneLock);
+                const int incomingVersion = (int)incomingScene.getProperty("version", 0);
+                if (incomingVersion >= sceneStateVersion.load()) {
+                    sceneModel.fromValueTree(incomingScene);
+                    sceneStateVersion.store(incomingVersion);
+                }
             }
         }
 

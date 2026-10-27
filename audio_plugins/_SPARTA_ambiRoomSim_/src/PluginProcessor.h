@@ -28,6 +28,7 @@
 #include "ambi_roomsim.h"
 #include "pathAutomation.h"
 #include "waveformCapture.h"
+#include "ui/SceneModel.h"
 #include <thread>
 #include <atomic>
 #include <array>
@@ -117,6 +118,21 @@ public:
     }
     double getCurrentHostTime() const { return currentHostTime.load(); }
 
+    /* Scene metadata (actor casting, names, markers, view preferences).
+       Purely visual: the audio thread never touches it. The version guard
+       mirrors the path-bank guard so a stale host snapshot cannot overwrite
+       newer in-memory edits. */
+    studio::SceneModel& getSceneModel() { return sceneModel; }
+    const studio::SceneModel& getSceneModel() const { return sceneModel; }
+    juce::CriticalSection& getSceneLock() { return sceneLock; }
+    int getSceneStateVersion() const { return sceneStateVersion.load(); }
+    void markSceneDirty(bool notifyHost = true) {
+        sceneStateVersion.fetch_add(1, std::memory_order_release);
+        if (notifyHost)
+            updateHostDisplay(juce::AudioProcessorListener::ChangeDetails{}
+                                  .withNonParameterStateChanged(true));
+    }
+
     /* True when the host position is expressed in PPQ (bars) rather than in
        seconds. The GUI labels the time fields accordingly. */
     bool isTimeInPpq() const { return getParameterChoice("pathTimeMode") == 1; }
@@ -185,6 +201,12 @@ private:
     mutable std::atomic<double> maxHostTime{0.0};
     std::atomic<bool> applyingFromAutomation{false};
     double lastWaveHostTime = 0.0;
+
+    /* Scene metadata (see getSceneModel). Guarded by sceneLock because the
+       host may save/restore state from a different thread than the editor. */
+    studio::SceneModel sceneModel;
+    juce::CriticalSection sceneLock;
+    std::atomic<int> sceneStateVersion{0};
 
     /* Cached pointers to the position parameters that mirror the path-driven
        object positions. They are looked up once (building juce::Strings per

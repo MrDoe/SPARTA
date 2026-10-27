@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include "PluginProcessor.h"
 #include "pathAutomation.h"
+#include "ui/SelectionState.h"
 
 class pathTimelineView  : public Component
 {
@@ -21,6 +22,12 @@ public:
 
     /* Called when the user clicks the timeline to preview a position. */
     std::function<void(double)> onPreviewRequested;
+    /* Selection follows checkpoint/row clicks, in both directions. */
+    void setSelection (const studio::Selection& newSelection);
+    const studio::Selection& getSelection() const { return selection; }
+    std::function<void (studio::Selection)> onSelectionChanged;
+    /* Called after a checkpoint has been retimed by dragging. */
+    std::function<void()> onPathEdited;
 
     void paint (juce::Graphics& g) override;
     void resized() override;
@@ -38,6 +45,7 @@ private:
     int dragObjectIdx = -1;
     bool dragIsReceiver = false;
     int dragKeyframeIdx = -1;
+    studio::Selection selection;
 
     struct RowInfo {
         juce::String label;

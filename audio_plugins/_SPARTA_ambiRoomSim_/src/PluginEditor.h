@@ -1,22 +1,22 @@
 /*
  ==============================================================================
- 
+
   This file is part of SPARTA; a suite of spatial audio plug-ins.
-  Copyright (c) 2018 - Leo McCormack.
- 
+  Copyright (c) 2026 - SPARTA contributors.
+
   SPARTA is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 3 of the License, or
   (at your option) any later version.
- 
+
   SPARTA is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
   GNU General Public License for more details.
- 
+
   You should have received a copy of the GNU General Public License
   along with SPARTA.  If not, see <http://www.gnu.org/licenses/>.
- 
+
  ==============================================================================
 */
 
@@ -24,65 +24,27 @@
 
 #include "JuceHeader.h"
 #include "PluginProcessor.h"
-#include "pannerView.h"
-#include "pathTimelineView.h"
-#include "RoomSettingsView.h"
-#include "PathEditView.h"
-#include "../../resources/SPARTALookAndFeel.h"
+#include "ui/StudioShell.h"
 
-typedef enum _SPARTA_WARNINGS{
-    k_warning_none,
-    k_warning_NinputCH,
-    k_warning_NoutputCH,
-    k_warning_frameSize
-}SPARTA_WARNINGS;
-
-class PluginEditor  : public AudioProcessorEditor,
-                       public Timer,
-                       public juce::Button::Listener,
-                       public juce::FilenameComponentListener
+/* Thin editor host. All layout and behaviour lives in StudioShell, which
+   fills the whole editor window; the editor only owns the window sizing and
+   the optional OpenGL acceleration context. */
+class PluginEditor : public AudioProcessorEditor
 {
 public:
-    PluginEditor (PluginProcessor& p);
+    explicit PluginEditor (PluginProcessor& p);
     ~PluginEditor() override;
 
-    void timerCallback() override;
     void paint (juce::Graphics& g) override;
     void resized() override;
-    void buttonClicked(juce::Button* buttonThatWasClicked) override;
-    void filenameComponentChanged(juce::FilenameComponent*) override;
 
 private:
     PluginProcessor& processor;
-    void* hAmbi;
+    std::unique_ptr<StudioShell> shell;
+
 #ifndef PLUGIN_EDITOR_DISABLE_OPENGL
-    std::unique_ptr<OpenGLGraphicsContextCustomShader> shader;
     OpenGLContext openGLContext;
 #endif
-    SPARTALookAndFeel LAF;
-
-    std::unique_ptr<RoomSettingsView> roomSettingsView;
-    std::unique_ptr<PathEditView> pathEditView;
-    std::unique_ptr<pannerView> panWindow;
-    std::unique_ptr<pathTimelineView> pathTimeline;
-    std::unique_ptr<juce::ToggleButton> RB_moveSR;
-    std::unique_ptr<juce::ToggleButton> RB_drawPath;
-    std::unique_ptr<juce::ToggleButton> TB_preview;
-    juce::FilenameComponent trackChooser{"Track", juce::File(), true, false, false,
-                                         "*.wav;*.aiff;*.aif;*.mp3", juce::String(),
-                                         "Load track file..."};
-
-    SPARTA_WARNINGS currentWarning;
-    SharedResourcePointer<TooltipWindow> tipWindow;
-    std::unique_ptr<juce::ComboBox> pluginDescription;
-
-    /* Preview position: while it is active the room view shows the objects
-       at the position they will have at previewTime, instead of their live
-       position. */
-    double previewTime = 0.0;
-    bool previewActive = false;
-    void setPreview (double t, bool active);
-    void updatePreviewButton();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginEditor)
 };
