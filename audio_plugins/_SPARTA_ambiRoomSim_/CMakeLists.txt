@@ -83,10 +83,17 @@ PUBLIC
 target_link_libraries(${PROJECT_NAME} 
 PRIVATE 
     saf_example_ambi_roomsim
+    saf
     GUI_fonts
     juce::juce_recommended_config_flags
     juce::juce_audio_plugin_client
     juce::juce_audio_utils
+)
+
+# Receiver facing rotates the Ambisonic output with getSHrotMtxReal().
+target_include_directories(${PROJECT_NAME}
+PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../SDKs/Spatial_Audio_Framework/framework/include
 )
 
 # The JUCE OpenGL module seems to have some issues on Linux...

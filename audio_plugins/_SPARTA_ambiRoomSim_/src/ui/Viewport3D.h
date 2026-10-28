@@ -108,6 +108,9 @@ private:
         bool actor = false;
         bool checkpoint = false;
         bool checkpointChanged = false;
+        bool handle = false;
+        bool handleIsIn = false;
+        bool handleChanged = false;
         bool vertical = false;
         bool orbit = false;
         bool pan = false;

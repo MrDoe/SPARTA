@@ -309,6 +309,20 @@ void Viewport3D::mouseDown (const juce::MouseEvent& e)
            point. */
         if (options.showPaths)
         {
+            /* Spline handles of the selected node take priority over the
+               node itself, so a handle that overlaps a checkpoint can still
+               be grabbed. */
+            bool handleIsIn = false;
+            if (studio::SceneRenderer::pickSplineHandle (getLocalBounds(), processor,
+                                                         camera, e.position, selection,
+                                                         handleIsIn))
+            {
+                drag.handle = true;
+                drag.handleIsIn = handleIsIn;
+                drag.selection = selection;
+                return;
+            }
+
             const auto pickedNode = studio::SceneRenderer::pickCheckpoint (
                 getLocalBounds(), processor, camera, e.position, selection);
 
@@ -414,6 +428,82 @@ void Viewport3D::mouseDrag (const juce::MouseEvent& e)
         return;
     }
 
+    if (drag.handle && drag.selection.isCheckpoint())
+    {
+        const bool isReceiver = drag.selection.checkpointIsReceiver;
+        const int index = drag.selection.index;
+        const int keyframeIndex = drag.selection.keyframe;
+        bool changed = false;
+
+        {
+            const juce::SpinLock::ScopedLockType sl (processor.getPathLock());
+            PathData& path = isReceiver ? processor.getPathBank().getReceiverPath (index)
+                                        : processor.getPathBank().getSourcePath (index);
+
+            if (keyframeIndex >= 0 && keyframeIndex < (int) path.keyframes.size())
+            {
+                auto& keyframe = path.keyframes[(size_t) keyframeIndex];
+                const studio::Vec3 node (keyframe.x, keyframe.y, keyframe.z);
+                const studio::Vec3 handle = drag.handleIsIn
+                    ? studio::Vec3 (keyframe.x - keyframe.txIn / 3.0f,
+                                    keyframe.y - keyframe.tyIn / 3.0f,
+                                    keyframe.z - keyframe.tzIn / 3.0f)
+                    : studio::Vec3 (keyframe.x + keyframe.txOut / 3.0f,
+                                    keyframe.y + keyframe.tyOut / 3.0f,
+                                    keyframe.z + keyframe.tzOut / 3.0f);
+
+                studio::Vec3 hit;
+                if (camera.rayToPlane (e.position, handle, camera.forward, hit))
+                {
+                    const studio::Vec3 tangent = (hit - node) * 3.0f;
+
+                    if (drag.handleIsIn)
+                    {
+                        keyframe.txIn = -tangent.x;
+                        keyframe.tyIn = -tangent.y;
+                        keyframe.tzIn = -tangent.z;
+                    }
+                    else
+                    {
+                        keyframe.txOut = tangent.x;
+                        keyframe.tyOut = tangent.y;
+                        keyframe.tzOut = tangent.z;
+                    }
+
+                    /* Keep the handles symmetric (mIn == mOut) so the curve
+                       stays smooth through the node; Shift breaks the
+                       symmetry for a corner. */
+                    if (! e.mods.isShiftDown())
+                    {
+                        if (drag.handleIsIn)
+                        {
+                            keyframe.txOut = keyframe.txIn;
+                            keyframe.tyOut = keyframe.tyIn;
+                            keyframe.tzOut = keyframe.tzIn;
+                        }
+                        else
+                        {
+                            keyframe.txIn = keyframe.txOut;
+                            keyframe.tyIn = keyframe.tyOut;
+                            keyframe.tzIn = keyframe.tzOut;
+                        }
+                    }
+
+                    changed = true;
+                }
+            }
+        }
+
+        if (changed)
+        {
+            drag.handleChanged = true;
+            processor.markPathDirty (false);
+            repaint();
+        }
+
+        return;
+    }
+
     if (drag.checkpoint && drag.selection.isCheckpoint())
     {
         const bool isReceiver = drag.selection.checkpointIsReceiver;
@@ -509,6 +599,12 @@ void Viewport3D::mouseUp (const juce::MouseEvent&)
     endParameterGestures();
 
     if (drag.checkpointChanged)
+    {
+        processor.markPathDirty();
+        notifyPathEdited();
+    }
+
+    if (drag.handleChanged)
     {
         processor.markPathDirty();
         notifyPathEdited();
@@ -765,6 +861,14 @@ void Viewport3D::addSourceAt (juce::Point<float> screenPosition)
     setPositionParameter (processor, false, numSources, 'X', x);
     setPositionParameter (processor, false, numSources, 'Y', y);
     setPositionParameter (processor, false, numSources, 'Z', juce::jmin (1.4f, roomZ));
+
+    /* New sources start as marker pins at the clicked position. */
+    {
+        const juce::ScopedLock sl (processor.getSceneLock());
+        processor.getSceneModel().getActor (false, numSources).kind
+            = studio::ActorKind::marker;
+    }
+    processor.markSceneDirty();
 
     setSelection (studio::Selection::source (numSources));
 
@@ -1158,7 +1262,7 @@ juce::String Viewport3D::getToolHint() const
     switch (tool)
     {
         case Tool::select:
-            return "Click node or actor  /  Drag to move  /  Shift drag height  /  Del removes node";
+            return "Click node or actor  /  Drag to move  /  Drag handles to shape  /  Shift drag height";
         case Tool::addSource:
             return "Click the floor to place a source  /  Alt-drag orbit";
         case Tool::drawSpline:

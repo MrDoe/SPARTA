@@ -31,9 +31,10 @@ namespace studio
 {
 
 /* Visual metadata for one source/receiver: which built-in actor represents
-   it, an optional display name, and a visual yaw/scale. None of this changes
-   the acoustics; it is stored in the plug-in state under a SCENE node so the
-   casting survives save/reload. */
+   it, an optional display name, and a visual yaw/scale. The receiver yaw is
+   not purely cosmetic: the processor rotates that receiver's Ambisonic
+   output by (180 - yaw) degrees. Everything else is stored in the plug-in
+   state under a SCENE node so the casting survives save/reload. */
 struct ActorInfo
 {
     ActorKind kind = ActorKind::performer;

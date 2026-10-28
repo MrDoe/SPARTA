@@ -120,19 +120,33 @@ public:
     bool isHostPlaying() const { return hostPlaying.load(); }
 
     /* Scene metadata (actor casting, names, markers, view preferences).
-       Purely visual: the audio thread never touches it. The version guard
-       mirrors the path-bank guard so a stale host snapshot cannot overwrite
-       newer in-memory edits. */
+       The audio thread never reads the SceneModel itself: the receiver
+       facing angles are published into lock-free atomics by
+       syncReceiverYawFromScene(), which is called after every scene edit.
+       The version guard mirrors the path-bank guard so a stale host
+       snapshot cannot overwrite newer in-memory edits. */
     studio::SceneModel& getSceneModel() { return sceneModel; }
     const studio::SceneModel& getSceneModel() const { return sceneModel; }
     juce::CriticalSection& getSceneLock() { return sceneLock; }
     int getSceneStateVersion() const { return sceneStateVersion.load(); }
     void markSceneDirty(bool notifyHost = true) {
         sceneStateVersion.fetch_add(1, std::memory_order_release);
+        /* The receiver facing is part of the audible state, so publish it
+           whenever the scene changes. sceneLock is recursive, so callers
+           that already hold it are fine. */
+        syncReceiverYawFromScene();
         if (notifyHost)
             updateHostDisplay(juce::AudioProcessorListener::ChangeDetails{}
                                   .withNonParameterStateChanged(true));
     }
+
+    /* Listener facing. Each receiver's yaw is metadata, but it is not just
+       visual: processBlock() rotates that receiver's Ambisonic output by
+       (180 - yaw) degrees, so turning the listener turns the whole sound
+       field around it. 180 degrees is the unchanged reference. */
+    void setReceiverYawDegrees(int index, float degrees);
+    float getReceiverYawDegrees(int index) const;
+    void syncReceiverYawFromScene();
 
     /* True when the host position is expressed in PPQ (bars) rather than in
        seconds. The GUI labels the time fields accordingly. */
@@ -221,6 +235,20 @@ private:
     std::array<PositionParams, ROOM_SIM_MAX_NUM_SOURCES> sourceParams;
     std::array<PositionParams, ROOM_SIM_MAX_NUM_RECEIVERS> receiverParams;
     void cachePositionParameters();
+
+    /* Receiver facing -> Ambisonic rotation. The yaw values are written by
+       the message thread (scene edits) and read by the audio thread without
+       a lock. The rotation matrices are audio-thread-owned; prepareToPlay()
+       allocates the maximum size up-front so an output-order change never
+       has to allocate while processing. */
+    std::array<std::atomic<float>, ROOM_SIM_MAX_NUM_RECEIVERS> receiverYawDeg;
+    std::array<float, ROOM_SIM_MAX_NUM_RECEIVERS> receiverRotationAngle {};
+    std::array<float, ROOM_SIM_MAX_NUM_RECEIVERS> receiverRotationApplied {};
+    std::array<std::vector<float>, ROOM_SIM_MAX_NUM_RECEIVERS> receiverRotationMtx;
+    int receiverRotationNSH = 0;
+    int receiverRotationOrder = 0;
+    void updateReceiverRotationMatrices (int numSamples);
+    void applyReceiverRotations (float* const* outFrame, int numOuts, int frameSize);
 
     /* Waveform capture of the mono input mix (see waveformCapture.h). */
     WaveformCapture waveformCapture;

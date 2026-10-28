@@ -64,6 +64,9 @@ struct Camera
 
     /* Intersects the screen ray with a horizontal plane at the given height. */
     bool rayToPlane (juce::Point<float> screen, float planeZ, Vec3& world) const;
+    /* Intersects the screen ray with an arbitrary plane. */
+    bool rayToPlane (juce::Point<float> screen, const Vec3& planePoint,
+                     const Vec3& planeNormal, Vec3& world) const;
     /* World units covered by one screen pixel at the given view depth. */
     float worldPerPixel (float depth) const;
 
@@ -113,6 +116,22 @@ public:
                                      const Camera& camera,
                                      juce::Point<float> mouse,
                                      const Selection& preferred);
+
+    /* World positions of the selected checkpoint's spline handles:
+       P - mIn/3 and P + mOut/3. Returns false unless a checkpoint is
+       selected and the keyframe still exists. */
+    static bool getSplineHandlePositions (PluginProcessor& processor,
+                                          const Selection& selection,
+                                          Vec3& inHandle, Vec3& outHandle);
+
+    /* Returns true when the mouse is over one of the selected checkpoint's
+       spline handles; isIn says which one. */
+    static bool pickSplineHandle (juce::Rectangle<int> bounds,
+                                  PluginProcessor& processor,
+                                  const Camera& camera,
+                                  juce::Point<float> mouse,
+                                  const Selection& selection,
+                                  bool& isIn);
 
     static void frameRoom (Camera& camera, PluginProcessor& processor,
                            juce::Rectangle<int> bounds);

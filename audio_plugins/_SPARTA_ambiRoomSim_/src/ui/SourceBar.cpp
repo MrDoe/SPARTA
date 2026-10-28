@@ -367,6 +367,18 @@ void SourceBar::addObject (bool isReceiver)
     clamp ('Y', roomY);
     clamp ('Z', roomZ);
 
+    /* New sources start as marker pins; the user can recast them in the
+       inspector once the acoustic position is placed. */
+    if (! isReceiver)
+    {
+        {
+            const juce::ScopedLock sl (processor.getSceneLock());
+            processor.getSceneModel().getActor (false, newIndex).kind
+                = studio::ActorKind::marker;
+        }
+        processor.markSceneDirty();
+    }
+
     selection = isReceiver ? studio::Selection::receiver (newIndex)
                            : studio::Selection::source (newIndex);
 

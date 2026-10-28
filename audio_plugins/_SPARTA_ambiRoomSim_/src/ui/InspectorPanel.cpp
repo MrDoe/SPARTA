@@ -244,7 +244,10 @@ public:
             auto r = juce::Rectangle<int> (0, y, getWidth(), row.height);
             rowBounds.push_back (r);
 
-            const int controlHeight = juce::jmin (24, row.height);
+            int controlHeight = juce::jmin (24, row.height);
+            if (nodeTable != nullptr && row.control == nodeTable.get())
+                controlHeight = juce::jmax (60, row.height);
+
             auto controlArea = r.withTrimmedLeft (sidePad + row.labelWidth)
                                 .withTrimmedRight (sidePad);
 
@@ -765,8 +768,14 @@ private:
         addControl ("Position Z", makeSlider (roomAxisParameterID ('Z')));
 
         addValue ("Directivity", "Omnidirectional");
-        addNote ("Directivity and Doppler are not modelled by the current "
-                 "image-source engine; the acoustic point is omnidirectional.");
+        if (isReceiver)
+            addNote ("The image-source receiver is omnidirectional. Facing rotates "
+                     "this receiver's Ambisonic output, so the whole scene turns "
+                     "around the listener; 180 deg is the unchanged reference. "
+                     "Doppler is not modelled.");
+        else
+            addNote ("The image-source source radiates omnidirectionally; Facing "
+                     "is visual only for sources. Doppler is not modelled.");
 
         frameButton.onClick = [this]
         {
@@ -957,7 +966,7 @@ private:
         nodeTable->getHeader().setStretchToFitActive (true);
         nodeTable->setClickingTogglesRowSelection (true);
         addAndMakeVisible (*nodeTable);
-        addControl ("Nodes", *nodeTable, 0, 180);
+        addControl ("Nodes", *nodeTable, 0, 200);
 
         if (selection.isCheckpoint())
             nodeTable->selectRow (selection.keyframe, juce::dontSendNotification);

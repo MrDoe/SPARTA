@@ -23,6 +23,8 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+#include "saf.h"
+
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
@@ -295,6 +297,14 @@ PluginProcessor::PluginProcessor()
 
     trackFormatManager.registerBasicFormats();
     cachePositionParameters();
+
+    /* Receiver facing defaults to 180 degrees, the unchanged reference
+       (see SceneModel::reset). Publish the scene values so the audio thread
+       has a valid snapshot before the first block. */
+    for (auto& yaw : receiverYawDeg)
+        yaw.store(180.0f, std::memory_order_relaxed);
+    syncReceiverYawFromScene();
+
     /* Reserve the keyframe buffers of both the live bank and the snapshot
        that the audio thread uses, so that the copy it makes whenever a path
        is edited never has to allocate memory on the audio thread. */
@@ -349,6 +359,18 @@ void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     if(!blockAdapter)
         blockAdapter = std::make_unique<BlockAdapter>();
     blockAdapter->configure(ambi_roomsim_getFrameSize(), nNumInputs, nNumOutputs, nHostBlockSize);
+
+    /* Allocate the largest possible SH rotation matrices up-front (10th
+       order: 121 x 121) so that changing the output order never allocates
+       on the audio thread. Only the first nSH x nSH entries are used. */
+    for (auto& matrix : receiverRotationMtx)
+        matrix.assign (121u * 121u, 0.0f);
+    for (auto& angle : receiverRotationAngle)
+        angle = 0.0f;
+    for (auto& applied : receiverRotationApplied)
+        applied = 1.0e9f;
+    receiverRotationNSH = 0;
+    receiverRotationOrder = 0;
 }
 
 void PluginProcessor::processBlock (AudioSampleBuffer& buffer, MidiBuffer& /*midiMessages*/)
@@ -413,8 +435,13 @@ void PluginProcessor::processBlock (AudioSampleBuffer& buffer, MidiBuffer& /*mid
     for (int i = 0; i < numRec; ++i)
         applyPath(i, pathSnapshot.getReceiverPath(i), t, true);
 
+    /* Update the receiver-facing rotation once per host block; the same
+       matrices are then applied to every processing frame in the block. */
+    updateReceiverRotationMatrices (buffer.getNumSamples());
+
     blockAdapter->processBlock (buffer, [this] (const float* const* inFrame, float* const* outFrame, int numIns, int numOuts, int frameSize) {
             ambi_roomsim_process(hAmbi, inFrame, outFrame, numIns, numOuts, frameSize);
+            applyReceiverRotations (outFrame, numOuts, frameSize);
         });
 }
 
@@ -466,11 +493,168 @@ void PluginProcessor::applyPath(int index, const PathData& path, double t, bool 
     if (pp.z != nullptr) pp.z->setValue(pp.z->convertTo0to1(z));
 }
 
+void PluginProcessor::setReceiverYawDegrees (int index, float degrees)
+{
+    if (index < 0 || index >= ROOM_SIM_MAX_NUM_RECEIVERS)
+        return;
+    receiverYawDeg[(size_t) index].store (degrees, std::memory_order_relaxed);
+}
+
+float PluginProcessor::getReceiverYawDegrees (int index) const
+{
+    if (index < 0 || index >= ROOM_SIM_MAX_NUM_RECEIVERS)
+        return 180.0f;
+    return receiverYawDeg[(size_t) index].load (std::memory_order_relaxed);
+}
+
+void PluginProcessor::syncReceiverYawFromScene()
+{
+    /* Called on the message thread after every scene edit. The audio thread
+       never touches the SceneModel; it only reads the atomics below. */
+    const juce::ScopedLock sl (sceneLock);
+    for (int i = 0; i < ROOM_SIM_MAX_NUM_RECEIVERS; ++i)
+        receiverYawDeg[(size_t) i].store (sceneModel.getActor (true, i).yawDegrees,
+                                          std::memory_order_relaxed);
+}
+
+void PluginProcessor::updateReceiverRotationMatrices (int numSamples)
+{
+    const int order = juce::jlimit (1, MAX_SH_ORDER, ambi_roomsim_getOutputOrder (hAmbi));
+    const int nSH = (order + 1) * (order + 1);
+
+    if (nSH != receiverRotationNSH)
+    {
+        receiverRotationNSH = nSH;
+        receiverRotationOrder = order;
+
+        for (auto& matrix : receiverRotationMtx)
+            if (matrix.size() < (size_t) nSH * (size_t) nSH)
+                matrix.assign ((size_t) nSH * (size_t) nSH, 0.0f);
+
+        /* Force a recompute for every receiver after an order change. */
+        for (auto& applied : receiverRotationApplied)
+            applied = 1.0e9f;
+    }
+
+    const float sampleRate = (float) juce::jmax (1, nSampleRate);
+    const float coefficient = 1.0f - std::exp (-(float) juce::jmax (1, numSamples)
+                                                / (sampleRate * 0.02f));
+
+    for (int i = 0; i < ROOM_SIM_MAX_NUM_RECEIVERS; ++i)
+    {
+        /* 180 degrees is the unchanged reference (no rotation). Wrap the
+           target into [-180, 180) so dragging the Facing slider across
+           +/-180 degrees does not spin the scene all the way around. */
+        float targetDegrees = 180.0f - receiverYawDeg[(size_t) i].load (std::memory_order_relaxed);
+        targetDegrees = std::fmod (targetDegrees + 180.0f, 360.0f);
+        if (targetDegrees < 0.0f)
+            targetDegrees += 360.0f;
+        targetDegrees -= 180.0f;
+
+        const float target = juce::degreesToRadians (targetDegrees);
+        float current = receiverRotationAngle[(size_t) i];
+        float delta = target - current;
+
+        /* Shortest way around the circle. */
+        delta = std::fmod (delta + juce::MathConstants<float>::pi,
+                           2.0f * juce::MathConstants<float>::pi);
+        if (delta < 0.0f)
+            delta += 2.0f * juce::MathConstants<float>::pi;
+        delta -= juce::MathConstants<float>::pi;
+
+        if (std::abs (delta) < 1.0e-4f)
+            current = target;
+        else
+            current += delta * coefficient;
+
+        receiverRotationAngle[(size_t) i] = current;
+
+        if (std::abs (current - receiverRotationApplied[(size_t) i]) > 1.0e-4f)
+        {
+            const float c = std::cos (current);
+            const float s = std::sin (current);
+            float R[3][3] = { {  c, -s, 0.0f },
+                              {  s,  c, 0.0f },
+                              { 0.0f, 0.0f, 1.0f } };
+            getSHrotMtxReal (R, receiverRotationMtx[(size_t) i].data(), order);
+            receiverRotationApplied[(size_t) i] = current;
+        }
+    }
+}
+
+void PluginProcessor::applyReceiverRotations (float* const* outFrame, int numOuts,
+                                              int frameSize)
+{
+    if (receiverRotationNSH <= 1 || receiverRotationOrder < 1 || outFrame == nullptr)
+        return;
+
+    const int nSH = receiverRotationNSH;
+    const int order = receiverRotationOrder;
+    const int numReceivers = juce::jmin (ROOM_SIM_MAX_NUM_RECEIVERS,
+                                         ambi_roomsim_getNumReceivers (hAmbi));
+    const bool fuma = ambi_roomsim_getChOrder (hAmbi) == 2; /* CH_FUMA */
+    static constexpr int acnToFuma[4] = { 0, 2, 3, 1 };
+
+    for (int rec = 0; rec < numReceivers; ++rec)
+    {
+        if (std::abs (receiverRotationAngle[(size_t) rec]) < 1.0e-5f)
+            continue;
+
+        const int base = rec * nSH;
+        if (base >= numOuts)
+            break;
+        const int available = juce::jmin (nSH, numOuts - base);
+        const float* matrix = receiverRotationMtx[(size_t) rec].data();
+
+        /* The SH rotation matrix is block-diagonal by order, so only the
+           (2l+1)^2 block of each order has to be multiplied. */
+        for (int l = 1; l <= order; ++l)
+        {
+            const int start = l * l;
+            const int size = 2 * l + 1;
+            if (start + size > available)
+                break;
+
+            for (int sample = 0; sample < frameSize; ++sample)
+            {
+                float input[21];
+                float output[21];
+
+                for (int j = 0; j < size; ++j)
+                {
+                    /* input[] is in ACN order for the matrix multiply; when
+                       the host buffer uses FuMa, fetch each ACN coefficient
+                       from its FuMa channel instead. */
+                    const int channel = start + j;
+                    const int source = fuma && channel < 4 ? acnToFuma[channel] : channel;
+                    input[j] = outFrame[base + source][sample];
+                }
+
+                for (int i = 0; i < size; ++i)
+                {
+                    const float* row = matrix + (size_t) (start + i) * (size_t) nSH
+                                                + (size_t) start;
+                    float sum = 0.0f;
+                    for (int j = 0; j < size; ++j)
+                        sum += row[j] * input[j];
+                    output[i] = sum;
+                }
+
+                for (int i = 0; i < size; ++i)
+                {
+                    const int channel = start + i;
+                    const int destination = fuma && channel < 4 ? acnToFuma[channel] : channel;
+                    outFrame[base + destination][sample] = output[i];
+                }
+            }
+        }
+    }
+}
+
 AudioProcessorEditor* PluginProcessor::createEditor()
 {
     return new PluginEditor (*this);
 }
-
 void PluginProcessor::getStateInformation (MemoryBlock& destData)
 {
     juce::ValueTree state = parameters.copyState();
@@ -666,6 +850,10 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
                     sceneStateVersion.store(incomingVersion);
                 }
             }
+
+            /* The facing angles are part of the restored scene; publish them
+               so the next audio block rotates the receivers correctly. */
+            syncReceiverYawFromScene();
         }
 
         /* Restore the reference track on initialization: kick off a decode

@@ -259,6 +259,62 @@ namespace
         }
     }
 
+    /* Receiver orientation. Actors are authored facing +y, so the yaw turns
+       that into (-sin, cos). The arrow lies on the floor just beyond the
+       shadow disc and is drawn before the meshes, which keeps it occluded
+       correctly when the listener turns away from the camera. */
+    void drawListenerDirection (juce::Graphics& g, const Camera& camera,
+                                const ActorVisual& actor)
+    {
+        if (actor.definition == nullptr)
+            return;
+
+        const float scale = juce::jlimit (0.4f, 2.5f, actor.scale);
+        const float footprint = juce::jmax (0.18f, actor.definition->footprint) * scale;
+
+        const Vec3 forward (-std::sin (actor.yawRadians),
+                             std::cos (actor.yawRadians), 0.0f);
+        const Vec3 side (forward.y, -forward.x, 0.0f);
+
+        const float z = 0.015f;
+        const float tailDistance = footprint * 1.10f + 0.08f;
+        const float length = juce::jlimit (0.80f, 1.70f,
+                                           footprint * 1.35f + 0.55f);
+        const float shaftHalf = 0.052f * scale;
+        const float headHalf = 0.165f * scale;
+        const float headLength = juce::jmin (0.40f * scale, length * 0.55f);
+
+        const Vec3 origin (actor.base.x, actor.base.y, z);
+        const Vec3 tail = origin + forward * tailDistance;
+        const Vec3 neck = origin + forward * (tailDistance + length - headLength);
+        const Vec3 tip = origin + forward * (tailDistance + length);
+
+        const std::vector<Vec3> points = {
+            tail + side * shaftHalf,
+            neck + side * shaftHalf,
+            neck + side * headHalf,
+            tip,
+            neck - side * headHalf,
+            neck - side * shaftHalf,
+            tail - side * shaftHalf
+        };
+
+        juce::Path path;
+        float depth = 0.0f;
+        if (! projectWorldPolygon (camera, points, path, depth))
+            return;
+
+        const auto colour = actor.selected ? Colours::accent : actor.colour;
+        g.setColour (colour.withAlpha (actor.selected ? 0.24f : 0.14f));
+        g.strokePath (path, juce::PathStrokeType (3.0f,
+                                                  juce::PathStrokeType::curved,
+                                                  juce::PathStrokeType::rounded));
+        g.setColour (colour.withAlpha (actor.selected ? 1.0f : 0.80f));
+        g.fillPath (path);
+        g.setColour (Colours::bg.withAlpha (0.55f));
+        g.strokePath (path, juce::PathStrokeType (0.8f));
+    }
+
     void drawDashedLine (juce::Graphics& g, juce::Point<float> a,
                          juce::Point<float> b, juce::Colour colour)
     {
@@ -467,6 +523,9 @@ namespace
                            radius, juce::Colour (0xff000000).withAlpha (0.40f * heightFactor));
             drawFloorDisc (g, camera, { actor.position.x, actor.position.y, 0.004f },
                            radius * 0.62f, juce::Colour (0xff000000).withAlpha (0.22f * heightFactor));
+
+            if (actor.selection.isReceiver())
+                drawListenerDirection (g, camera, actor);
 
             /* A dashed drop line makes the acoustic height legible. */
             juce::Point<float> pa, pb;
@@ -896,6 +955,69 @@ namespace
         }
     }
 
+    void drawSelectedSplineHandles (juce::Graphics& g, const Camera& camera,
+                                    PluginProcessor& processor,
+                                    const RenderOptions& options,
+                                    const Selection& selection)
+    {
+        if (! options.showPaths || ! selection.isCheckpoint())
+            return;
+
+        const int keyframeIndex = selection.keyframe;
+        if (keyframeIndex < 0)
+            return;
+
+        const bool isReceiver = selection.checkpointIsReceiver;
+        const int index = selection.index;
+        const PathData& path = isReceiver ? processor.getPathBank().getReceiverPath (index)
+                                          : processor.getPathBank().getSourcePath (index);
+        if (keyframeIndex >= (int) path.keyframes.size())
+            return;
+
+        const auto& keyframe = path.keyframes[(size_t) keyframeIndex];
+        const Vec3 node (keyframe.x, keyframe.y, keyframe.z);
+        const Vec3 inHandle (keyframe.x - keyframe.txIn / 3.0f,
+                             keyframe.y - keyframe.tyIn / 3.0f,
+                             keyframe.z - keyframe.tzIn / 3.0f);
+        const Vec3 outHandle (keyframe.x + keyframe.txOut / 3.0f,
+                              keyframe.y + keyframe.tyOut / 3.0f,
+                              keyframe.z + keyframe.tzOut / 3.0f);
+
+        juce::Point<float> nodePoint, inPoint, outPoint;
+        float nodeDepth = 0.0f, inDepth = 0.0f, outDepth = 0.0f;
+        if (! camera.project (node, nodePoint, nodeDepth))
+            return;
+
+        const bool inVisible = camera.project (inHandle, inPoint, inDepth);
+        const bool outVisible = camera.project (outHandle, outPoint, outDepth);
+        const auto colour = getPathColour (isReceiver, index);
+
+        auto drawHandle = [&] (juce::Point<float> point, bool filled)
+        {
+            g.setColour (Colours::bg.withAlpha (0.92f));
+            g.fillEllipse (point.x - 5.0f, point.y - 5.0f, 10.0f, 10.0f);
+            g.setColour (colour.withAlpha (0.95f));
+            if (filled)
+                g.fillEllipse (point.x - 3.2f, point.y - 3.2f, 6.4f, 6.4f);
+            else
+                g.drawEllipse (point.x - 3.2f, point.y - 3.2f, 6.4f, 6.4f, 1.5f);
+        };
+
+        if (inVisible)
+        {
+            g.setColour (colour.withAlpha (0.55f));
+            g.drawLine (nodePoint.x, nodePoint.y, inPoint.x, inPoint.y, 1.1f);
+            drawHandle (inPoint, false);
+        }
+
+        if (outVisible)
+        {
+            g.setColour (colour.withAlpha (0.55f));
+            g.drawLine (nodePoint.x, nodePoint.y, outPoint.x, outPoint.y, 1.1f);
+            drawHandle (outPoint, true);
+        }
+    }
+
     juce::Rectangle<float> placeLabelChip (juce::Graphics& g,
                                            juce::Point<float> anchor,
                                            juce::String text,
@@ -1213,6 +1335,42 @@ bool Camera::rayToPlane (juce::Point<float> screen, float planeZ, Vec3& world) c
     return true;
 }
 
+bool Camera::rayToPlane (juce::Point<float> screen, const Vec3& planePoint,
+                         const Vec3& planeNormal, Vec3& world) const
+{
+    const float screenX = screen.x - cx;
+    const float screenY = -(screen.y - cy);
+    const float denominator = dot (planeNormal, planeNormal);
+    if (denominator < 1.0e-8f)
+        return false;
+
+    Vec3 origin, direction;
+    if (orthographic)
+    {
+        origin = eye + right * (screenX / orthoScale)
+                     + up * (screenY / orthoScale);
+        direction = forward;
+    }
+    else
+    {
+        origin = eye;
+        const float scale = (viewH * 0.5f) / tanHalf;
+        direction = normalized (forward + right * (screenX / scale)
+                                          + up * (screenY / scale));
+    }
+
+    const float facing = dot (direction, planeNormal);
+    if (std::abs (facing) < 1.0e-6f)
+        return false;
+
+    const float t = dot (planePoint - origin, planeNormal) / facing;
+    if (t <= 0.0f)
+        return false;
+
+    world = origin + direction * t;
+    return true;
+}
+
 float Camera::worldPerPixel (float depth) const
 {
     if (orthographic)
@@ -1309,6 +1467,10 @@ void SceneRenderer::paint (juce::Graphics& g,
     drawPolygons (g, polygons);
 
     drawAcousticPoints (g, camera, actors);
+
+    /* The selected node's spline handles sit above the meshes but below the
+       keyframe diamonds and time chips, so the node itself stays readable. */
+    drawSelectedSplineHandles (g, camera, processor, options, selection);
 
     std::vector<ChipRect> chips;
     chips.reserve (64);
@@ -1438,6 +1600,66 @@ Selection SceneRenderer::pickCheckpoint (juce::Rectangle<int> bounds,
     }
 
     return best;
+}
+
+bool SceneRenderer::getSplineHandlePositions (PluginProcessor& processor,
+                                              const Selection& selection,
+                                              Vec3& inHandle, Vec3& outHandle)
+{
+    if (! selection.isCheckpoint())
+        return false;
+
+    const juce::SpinLock::ScopedLockType sl (processor.getPathLock());
+    const PathData& path = selection.checkpointIsReceiver
+                               ? processor.getPathBank().getReceiverPath (selection.index)
+                               : processor.getPathBank().getSourcePath (selection.index);
+    const int keyframeIndex = selection.keyframe;
+    if (keyframeIndex < 0 || keyframeIndex >= (int) path.keyframes.size())
+        return false;
+
+    const auto& keyframe = path.keyframes[(size_t) keyframeIndex];
+    inHandle = { keyframe.x - keyframe.txIn / 3.0f,
+                 keyframe.y - keyframe.tyIn / 3.0f,
+                 keyframe.z - keyframe.tzIn / 3.0f };
+    outHandle = { keyframe.x + keyframe.txOut / 3.0f,
+                  keyframe.y + keyframe.tyOut / 3.0f,
+                  keyframe.z + keyframe.tzOut / 3.0f };
+    return true;
+}
+
+bool SceneRenderer::pickSplineHandle (juce::Rectangle<int> bounds,
+                                      PluginProcessor& processor,
+                                      const Camera& cameraToUse,
+                                      juce::Point<float> mouse,
+                                      const Selection& selection,
+                                      bool& isIn)
+{
+    Vec3 inHandle, outHandle;
+    if (! getSplineHandlePositions (processor, selection, inHandle, outHandle))
+        return false;
+
+    Camera camera = cameraToUse;
+    camera.setup (bounds.toFloat());
+
+    constexpr float hitRadius = 9.0f;
+    juce::Point<float> point;
+    float depth = 0.0f;
+
+    if (camera.project (inHandle, point, depth)
+        && point.getDistanceFrom (mouse) <= hitRadius)
+    {
+        isIn = true;
+        return true;
+    }
+
+    if (camera.project (outHandle, point, depth)
+        && point.getDistanceFrom (mouse) <= hitRadius)
+    {
+        isIn = false;
+        return true;
+    }
+
+    return false;
 }
 
 void SceneRenderer::frameRoom (Camera& camera, PluginProcessor& processor,
