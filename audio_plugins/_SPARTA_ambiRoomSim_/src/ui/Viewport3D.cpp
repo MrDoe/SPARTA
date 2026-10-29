@@ -596,6 +596,7 @@ void Viewport3D::mouseDrag (const juce::MouseEvent& e)
 
 void Viewport3D::mouseUp (const juce::MouseEvent&)
 {
+    const bool parameterEdit = drag.gesturesStarted;
     endParameterGestures();
 
     if (drag.checkpointChanged)
@@ -611,6 +612,9 @@ void Viewport3D::mouseUp (const juce::MouseEvent&)
     }
 
     drag = DragState();
+
+    if (parameterEdit && onEditCommitted)
+        onEditCommitted();
 }
 
 void Viewport3D::mouseDoubleClick (const juce::MouseEvent& e)
@@ -836,6 +840,9 @@ void Viewport3D::nudgeSelection (float dx, float dy, float dz)
     setPositionParameter (processor, isReceiver, index, 'Y', y);
     setPositionParameter (processor, isReceiver, index, 'Z', z);
     repaint();
+
+    if (onEditCommitted)
+        onEditCommitted();
 }
 
 void Viewport3D::addSourceAt (juce::Point<float> screenPosition)

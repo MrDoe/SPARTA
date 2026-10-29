@@ -93,6 +93,9 @@ public:
     std::function<void (studio::Selection)> onSelectionChanged;
     std::function<void()> onSourceAdded;
     std::function<void()> onPathEdited;
+    /* Fired after a direct parameter edit in the canvas (actor drag or
+       keyboard nudge) so the shell can record an undo step. */
+    std::function<void()> onEditCommitted;
     std::function<void (Tool)> onToolChanged;
 
 private:

@@ -34,6 +34,11 @@ namespace
     constexpr int timelineDockHeight = 198;
     constexpr int timelineHeaderHeight = 28;
 
+    /* One undo step per gesture. Continuous edits keep refreshing the timer,
+       so a whole slider drag or node drag is captured as a single step. */
+    constexpr juce::uint32 undoCoalesceMs = 180;
+    constexpr size_t maxUndoSteps = 64;
+
     class ToolRailButton : public juce::Button
     {
     public:
@@ -101,6 +106,93 @@ namespace
     };
 }
 
+void StudioShell::EditorUndoHistory::reset (PluginProcessor& processor)
+{
+    undoStack.clear();
+    redoStack.clear();
+    lastState = processor.captureEditorState();
+}
+
+void StudioShell::EditorUndoHistory::sync (PluginProcessor& processor)
+{
+    lastState = processor.captureEditorState();
+}
+
+void StudioShell::EditorUndoHistory::checkpoint (PluginProcessor& processor)
+{
+    auto current = processor.captureEditorState();
+
+    if (lastState.isValid() && current.isEquivalentTo (lastState))
+        return;
+
+    if (lastState.isValid())
+    {
+        undoStack.push_back (lastState);
+        if (undoStack.size() > maxUndoSteps)
+            undoStack.erase (undoStack.begin());
+
+        /* A fresh edit invalidates the redo branch. */
+        redoStack.clear();
+    }
+
+    lastState = current;
+}
+
+bool StudioShell::EditorUndoHistory::undo (PluginProcessor& processor)
+{
+    auto current = processor.captureEditorState();
+
+    /* Capture an edit that has not reached the coalescing timer yet. */
+    if (lastState.isValid() && ! current.isEquivalentTo (lastState))
+    {
+        undoStack.push_back (lastState);
+        if (undoStack.size() > maxUndoSteps)
+            undoStack.erase (undoStack.begin());
+        redoStack.clear();
+        lastState = current;
+    }
+
+    if (undoStack.empty())
+        return false;
+
+    auto target = undoStack.back();
+    undoStack.pop_back();
+
+    redoStack.push_back (current);
+    if (redoStack.size() > maxUndoSteps)
+        redoStack.erase (redoStack.begin());
+
+    processor.restoreEditorState (target);
+    lastState = processor.captureEditorState();
+    return true;
+}
+
+bool StudioShell::EditorUndoHistory::redo (PluginProcessor& processor)
+{
+    auto current = processor.captureEditorState();
+
+    /* If an edit happened after the undo, the redo branch is gone. */
+    if (lastState.isValid() && ! current.isEquivalentTo (lastState))
+    {
+        checkpoint (processor);
+        return false;
+    }
+
+    if (redoStack.empty())
+        return false;
+
+    auto target = redoStack.back();
+    redoStack.pop_back();
+
+    undoStack.push_back (current);
+    if (undoStack.size() > maxUndoSteps)
+        undoStack.erase (undoStack.begin());
+
+    processor.restoreEditorState (target);
+    lastState = processor.captureEditorState();
+    return true;
+}
+
 StudioShell::StudioShell (PluginProcessor& p)
     : processor (p),
       viewport (p),
@@ -108,6 +200,14 @@ StudioShell::StudioShell (PluginProcessor& p)
       sourceBar (p)
 {
     hAmbi = processor.getFXHandle();
+
+    /* Restore the text scale before any of the panel contents are rebuilt. */
+    {
+        const juce::ScopedLock sl (processor.getSceneLock());
+        studio::uiFontScale() = juce::jlimit (
+            0.8f, 1.35f,
+            processor.getSceneModel().getUiPreferences().fontScale);
+    }
 
     setOpaque (true);
     setLookAndFeel (&lookAndFeel);
@@ -129,6 +229,7 @@ StudioShell::StudioShell (PluginProcessor& p)
         inspector.refresh();
         viewport.refresh();
         repaint();
+        noteEdit();
     };
 
     trackChooser.addListener (this);
@@ -195,7 +296,9 @@ StudioShell::StudioShell (PluginProcessor& p)
         sourceBar.refresh();
         applySelection (viewport.getSelection(), false);
         refreshSummary();
+        noteEdit();
     };
+    viewport.onEditCommitted = [this] { noteEdit(); };
     viewport.onToolChanged = [this] (Viewport3D::Tool) { updateRailSelection(); };
 
     viewport.onPathEdited = [this]
@@ -208,6 +311,7 @@ StudioShell::StudioShell (PluginProcessor& p)
 
         refreshSummary();
         repaint();
+        noteEdit();
     };
 
     inspector.onEdited = [this]
@@ -217,6 +321,7 @@ StudioShell::StudioShell (PluginProcessor& p)
         viewport.refresh();
         refreshSummary();
         repaint();
+        noteEdit();
     };
     inspector.onFrameRequested = [this] { viewport.frameSelection(); };
     inspector.onStructureChanged = [this]
@@ -225,6 +330,7 @@ StudioShell::StudioShell (PluginProcessor& p)
         viewport.refresh();
         refreshSummary();
         repaint();
+        noteEdit();
     };
     inspector.onSelectionRequested = [this] (studio::Selection newSelection)
     {
@@ -241,6 +347,7 @@ StudioShell::StudioShell (PluginProcessor& p)
         inspector.refresh();
         refreshSummary();
         repaint();
+        noteEdit();
     };
 
     if (processor.getParameterInt ("numSources") > 0)
@@ -254,6 +361,14 @@ StudioShell::StudioShell (PluginProcessor& p)
     updateWarning();
     syncRenderOptions();
     updateRailSelection();
+
+    undoHistory.reset (processor);
+    lastStateRestoreCounter = processor.getStateRestoreCounter();
+
+    /* The inspector content was constructed before the saved font scale was
+       applied, so rebuild it once with the restored scale. */
+    if (std::abs (studio::uiFontScale() - 1.0f) > 1.0e-3f)
+        inspector.rebuild();
 
     startTimer (80);
 }
@@ -452,7 +567,8 @@ void StudioShell::resized()
     timeArea = { stopButton.getX() - 138, topBarArea.getY(),
                  126, topBarHeight };
 #else
-    timeArea = { previewToggle.getX() - 138, topBarArea.getY(),
+    /* No transport buttons when the standalone wrapper is not built. */
+    timeArea = { focusButton.getX() - 138, topBarArea.getY(),
                  126, topBarHeight };
 #endif
     brandArea = { 12, topBarArea.getY(), 262, topBarHeight };
@@ -528,6 +644,29 @@ void StudioShell::resized()
 
 bool StudioShell::keyPressed (const juce::KeyPress& key)
 {
+    const auto mods = key.getModifiers();
+
+    if (mods.isCommandDown() && ! mods.isAltDown())
+    {
+        const int code = key.getKeyCode();
+
+        if (code == 'Z' || code == 'z')
+        {
+            if (mods.isShiftDown())
+                redo();
+            else
+                undo();
+
+            return true;
+        }
+
+        if (code == 'Y' || code == 'y')
+        {
+            redo();
+            return true;
+        }
+    }
+
     if (key == juce::KeyPress (juce::KeyPress::escapeKey))
     {
         if (isFullScreenMode())
@@ -820,6 +959,22 @@ void StudioShell::showPrimitivesMenu()
 
 void StudioShell::showSettingsMenu()
 {
+    /* Make any just-finished edit visible to the undo entries in this menu. */
+    flushUndoCheckpoint();
+
+    float currentScale = 1.0f;
+    {
+        const juce::ScopedLock sl (processor.getSceneLock());
+        currentScale = processor.getSceneModel().getUiPreferences().fontScale;
+    }
+
+    juce::PopupMenu fontMenu;
+    const float fontScales[] = { 0.9f, 1.0f, 1.1f, 1.2f, 1.3f };
+    const char* fontLabels[] = { "90%", "100%", "110%", "120%", "130%" };
+    for (int i = 0; i < 5; ++i)
+        fontMenu.addItem (20 + i, fontLabels[i], true,
+                          std::abs (currentScale - fontScales[i]) < 0.001f);
+
     juce::PopupMenu menu;
     menu.addItem (1, "Show inspector", true, inspectorVisible);
     menu.addItem (2, "Show timeline", true, timelineVisible);
@@ -830,6 +985,11 @@ void StudioShell::showSettingsMenu()
     menu.addItem (5, "Frame room");
     menu.addItem (6, "Focus mode", true, focusMode);
     menu.addItem (7, "Fullscreen", true, isFullScreenMode());
+    menu.addSeparator();
+    menu.addItem (8, "Undo (Ctrl+Z)", undoHistory.canUndo());
+    menu.addItem (9, "Redo (Ctrl+Shift+Z)", undoHistory.canRedo());
+    menu.addSeparator();
+    menu.addSubMenu ("Font size", fontMenu);
 
     const juce::Component::SafePointer<StudioShell> safe (this);
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&settingsButton),
@@ -858,6 +1018,7 @@ void StudioShell::showSettingsMenu()
                 safe->viewport.refresh();
                 safe->timeline->repaint();
                 safe->repaint();
+                safe->noteEdit();
                 break;
 
             case 5:
@@ -872,10 +1033,171 @@ void StudioShell::showSettingsMenu()
                 safe->toggleFullscreen();
                 break;
 
+            case 8:
+                safe->undo();
+                break;
+
+            case 9:
+                safe->redo();
+                break;
+
             default:
+                if (result >= 20 && result <= 24)
+                {
+                    static const float scales[] = { 0.9f, 1.0f, 1.1f, 1.2f, 1.3f };
+                    safe->setFontScale (scales[result - 20]);
+                }
                 break;
         }
+
+        safe->viewport.grabKeyboardFocus();
     });
+}
+
+void StudioShell::noteEdit()
+{
+    undoCheckpointPending = true;
+    lastEditTimeMs = juce::Time::getMillisecondCounter();
+}
+
+void StudioShell::flushUndoCheckpoint()
+{
+    if (! undoCheckpointPending)
+        return;
+
+    undoCheckpointPending = false;
+    undoHistory.checkpoint (processor);
+}
+
+void StudioShell::undo()
+{
+    flushUndoCheckpoint();
+
+    if (undoHistory.undo (processor))
+        applyRestoredState();
+}
+
+void StudioShell::redo()
+{
+    flushUndoCheckpoint();
+
+    if (undoHistory.redo (processor))
+        applyRestoredState();
+}
+
+void StudioShell::applyRestoredState()
+{
+    studio::UiPreferences preferences;
+    {
+        const juce::ScopedLock sl (processor.getSceneLock());
+        preferences = processor.getSceneModel().getUiPreferences();
+    }
+
+    studio::uiFontScale() = juce::jlimit (0.8f, 1.35f, preferences.fontScale);
+
+    syncRenderOptions();
+    inspector.rebuild();
+    sourceBar.refresh();
+    viewport.refresh();
+
+    if (timeline != nullptr)
+        timeline->repaint();
+
+    refreshSummary();
+    sanitizeSelection();
+    repaint();
+}
+
+void StudioShell::handleHostStateRestore()
+{
+    const int counter = processor.getStateRestoreCounter();
+
+    if (counter == lastStateRestoreCounter)
+        return;
+
+    lastStateRestoreCounter = counter;
+    undoCheckpointPending = false;
+
+    /* An external state change starts a new history; undoing across a host
+       session load or host undo would be surprising and could resurrect
+       stale parameter values. */
+    undoHistory.reset (processor);
+    applyRestoredState();
+}
+
+void StudioShell::sanitizeSelection()
+{
+    if (selection.isNone())
+        return;
+
+    const bool selectionIsReceiver = selection.isReceiver()
+        || (selection.isCheckpoint() && selection.checkpointIsReceiver);
+    const int limit = selectionIsReceiver ? processor.getParameterInt ("numReceivers")
+                                          : processor.getParameterInt ("numSources");
+
+    if (limit <= 0)
+    {
+        applySelection (studio::Selection::none(), true);
+        return;
+    }
+
+    if (selection.index >= limit)
+    {
+        applySelection (selectionIsReceiver
+                            ? studio::Selection::receiver (limit - 1)
+                            : studio::Selection::source (limit - 1),
+                        true);
+        return;
+    }
+
+    if (! selection.isCheckpoint())
+        return;
+
+    size_t count = 0;
+    {
+        const juce::SpinLock::ScopedLockType sl (processor.getPathLock());
+        const PathData& path = selectionIsReceiver
+            ? processor.getPathBank().getReceiverPath (selection.index)
+            : processor.getPathBank().getSourcePath (selection.index);
+        count = path.keyframes.size();
+    }
+
+    if (selection.keyframe < 0 || selection.keyframe >= (int) count)
+    {
+        applySelection (selectionIsReceiver
+                            ? studio::Selection::receiver (selection.index)
+                            : studio::Selection::source (selection.index),
+                        true);
+    }
+}
+
+void StudioShell::setFontScale (float scale)
+{
+    scale = juce::jlimit (0.8f, 1.35f, scale);
+
+    /* Font size is a UI preference, not a document edit: keep it out of the
+       undo history by synchronising the baseline after applying it. */
+    flushUndoCheckpoint();
+
+    {
+        const juce::ScopedLock sl (processor.getSceneLock());
+        processor.getSceneModel().getUiPreferences().fontScale = scale;
+    }
+
+    processor.markSceneDirty();
+    studio::uiFontScale() = scale;
+
+    inspector.rebuild();
+    sourceBar.refresh();
+    viewport.refresh();
+
+    if (timeline != nullptr)
+        timeline->repaint();
+
+    resized();
+    repaint();
+
+    undoHistory.sync (processor);
 }
 
 juce::String StudioShell::buildSummary() const
@@ -949,6 +1271,12 @@ juce::String StudioShell::warningText (Warning warning)
 
 void StudioShell::timerCallback()
 {
+    handleHostStateRestore();
+
+    if (undoCheckpointPending
+        && juce::Time::getMillisecondCounter() - lastEditTimeMs >= undoCoalesceMs)
+        flushUndoCheckpoint();
+
     updateWarning();
 
     const double now = processor.getCurrentHostTime();

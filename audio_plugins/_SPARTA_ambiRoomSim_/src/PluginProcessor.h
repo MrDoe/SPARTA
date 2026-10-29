@@ -148,6 +148,17 @@ public:
     float getReceiverYawDegrees(int index) const;
     void syncReceiverYawFromScene();
 
+    /* Editor undo/redo. A snapshot contains the parameter values, the path
+       bank and the scene metadata, i.e. everything the studio UI can edit.
+       The audio-thread snapshot and the receiver facing are refreshed by
+       restoreEditorState(), so an undo is audible immediately. */
+    juce::ValueTree captureEditorState();
+    void restoreEditorState(const juce::ValueTree& state);
+    /* Incremented whenever the host pushes a state (session load, host undo,
+       template). The editor uses it to drop its undo history rather than
+       undoing across an external state change. */
+    int getStateRestoreCounter() const { return stateRestoreCounter.load(); }
+
     /* True when the host position is expressed in PPQ (bars) rather than in
        seconds. The GUI labels the time fields accordingly. */
     bool isTimeInPpq() const { return getParameterChoice("pathTimeMode") == 1; }
@@ -223,6 +234,7 @@ private:
     studio::SceneModel sceneModel;
     juce::CriticalSection sceneLock;
     std::atomic<int> sceneStateVersion{0};
+    std::atomic<int> stateRestoreCounter{0};
 
     /* Cached pointers to the position parameters that mirror the path-driven
        object positions. They are looked up once (building juce::Strings per

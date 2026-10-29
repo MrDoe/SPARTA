@@ -28,6 +28,7 @@
 
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <vector>
 
 namespace
@@ -67,6 +68,147 @@ namespace
 
     private:
         juce::Array<juce::Button*> buttons;
+    };
+
+    /* A transparent overlay for one editable table cell. It draws nothing
+       (the table's paintCell() owns the value rendering) and starts a real
+       TextEditor when the table reports a double-click on the cell.
+
+       Using our own editor instead of juce::Label avoids two traps: Label's
+       showEditor/hideEditor are not virtual in this JUCE version, and Label
+       needs its text filled at refresh time, which would fight paintCell()
+       after edits made elsewhere (canvas, sliders, timeline). */
+    class NodeCellEditor : public juce::Component
+    {
+    public:
+        std::function<juce::String (int row, int columnId)> getValue;
+        std::function<void (int row, int columnId, const juce::String& text)> onCommit;
+        std::function<void (bool)> onEditingChanged;
+
+        int row = -1;
+        int columnId = 0;
+
+        NodeCellEditor()
+        {
+            setOpaque (false);
+            /* Let clicks fall through to the row component so the table can
+               select the row; only the inline TextEditor intercepts input. */
+            setInterceptsMouseClicks (false, true);
+        }
+
+        ~NodeCellEditor() override
+        {
+            if (isEditing && onEditingChanged != nullptr)
+                onEditingChanged (false);
+        }
+
+        bool isEditingCell() const noexcept { return isEditing; }
+
+        /* Commits an open editor immediately. Used when the table recycles
+           the cell (e.g. the user scrolls while typing) so the value can
+           never land on a different row. */
+        void commitNow() { commit(); }
+
+        void startEditing()
+        {
+            if (isEditing)
+                return;
+
+            isEditing = true;
+
+            editor = std::make_unique<juce::TextEditor>();
+            editor->setFont (studio::uiFont (10.5f));
+            editor->setJustification (juce::Justification::centredLeft);
+            editor->setBorder (juce::BorderSize<int> (1, 3, 1, 3));
+            editor->setColour (juce::TextEditor::backgroundColourId,
+                               studio::Colours::surface);
+            editor->setColour (juce::TextEditor::textColourId, studio::Colours::text);
+            editor->setColour (juce::TextEditor::outlineColourId,
+                               studio::Colours::accent);
+            editor->setColour (juce::TextEditor::focusedOutlineColourId,
+                               studio::Colours::accent);
+            editor->setColour (juce::TextEditor::highlightColourId,
+                               studio::Colours::accentDim);
+
+            if (getValue != nullptr)
+                editor->setText (getValue (row, columnId), false);
+
+            /* Commit/cancel are queued: deleting the TextEditor from inside
+               its own key/focus callback would pull the ground out from
+               under the call stack. */
+            editor->onReturnKey = [this] { queueCommit(); };
+            editor->onEscapeKey = [this] { queueCancel(); };
+            editor->onFocusLost = [this] { queueCommit(); };
+
+            addAndMakeVisible (*editor);
+            editor->setBounds (getLocalBounds());
+            editor->selectAll();
+            editor->grabKeyboardFocus();
+
+            if (onEditingChanged != nullptr)
+                onEditingChanged (true);
+        }
+
+        void paint (juce::Graphics&) override {}
+
+        void resized() override
+        {
+            if (editor != nullptr)
+                editor->setBounds (getLocalBounds());
+        }
+
+    private:
+        void queueCommit()
+        {
+            juce::Component::SafePointer<NodeCellEditor> safe (this);
+            juce::MessageManager::callAsync ([safe]
+            {
+                if (safe != nullptr)
+                    safe->commit();
+            });
+        }
+
+        void queueCancel()
+        {
+            juce::Component::SafePointer<NodeCellEditor> safe (this);
+            juce::MessageManager::callAsync ([safe]
+            {
+                if (safe != nullptr)
+                    safe->cancel();
+            });
+        }
+
+        void commit()
+        {
+            if (! isEditing)
+                return;
+
+            const auto text = editor->getText();
+            finishEditing();
+
+            if (onCommit != nullptr)
+                onCommit (row, columnId, text);
+        }
+
+        void cancel()
+        {
+            if (! isEditing)
+                return;
+
+            finishEditing();
+        }
+
+        void finishEditing()
+        {
+            isEditing = false;
+            editor.reset();
+
+            if (onEditingChanged != nullptr)
+                onEditingChanged (false);
+        }
+
+        std::unique_ptr<juce::TextEditor> editor;
+        bool isEditing = false;
     };
 
     struct MaterialPreset
@@ -123,11 +265,14 @@ public:
 
         hasPathSection = (tab == InspectorPanel::Tab::motion && hasObject);
 
-        if (tab == InspectorPanel::Tab::inspector)
+        if (tab == InspectorPanel::Tab::room)
         {
             buildRoomSection();
             buildMaterialsSection();
-
+            buildOutputSection();
+        }
+        else if (tab == InspectorPanel::Tab::inspector)
+        {
             if (hasObject)
                 buildActorSection();
             else
@@ -138,7 +283,6 @@ public:
             }
 
             buildCanvasSection();
-            buildOutputSection();
         }
         else
         {
@@ -157,6 +301,33 @@ public:
     }
 
     ~Content() override = default;
+
+    /* Re-points this content at a different checkpoint of the same actor.
+       Used instead of a full rebuild when the user clicks another node, so
+       an open table cell editor (and the scroll position) survives the
+       selection change. Only valid for checkpoint -> checkpoint moves. */
+    void updateSelection (const studio::Selection& newSelection)
+    {
+        selection = newSelection;
+        isCheckpoint = selection.isCheckpoint();
+
+        if (checkpointSectionRow >= 0
+            && checkpointSectionRow < (int) rows.size())
+        {
+            size_t count = 0;
+            {
+                const juce::SpinLock::ScopedLockType sl (processor.getPathLock());
+                count = currentPath().keyframes.size();
+            }
+
+            rows[(size_t) checkpointSectionRow].text =
+                "Checkpoint " + juce::String (selection.keyframe + 1)
+                + " of " + juce::String ((int) count);
+        }
+
+        refreshValues();
+        repaint();
+    }
 
     void paint (juce::Graphics& g) override
     {
@@ -353,7 +524,28 @@ public:
         }
 
         if (nodeTable != nullptr)
-            nodeTable->updateContent();
+        {
+            /* Rebuilding the rows destroys open cell editors, so only do it
+               when the row count changed and no cell is being edited. Value
+               changes are drawn by paintCell(), which reads the live path. */
+            if (nodeCellsEditing == 0 && (int) numKeyframes != nodeRowCount)
+            {
+                nodeRowCount = (int) numKeyframes;
+                nodeTable->updateContent();
+            }
+
+            if (selection.isCheckpoint()
+                && selection.keyframe >= 0
+                && selection.keyframe < (int) numKeyframes
+                && nodeTable->getSelectedRow() != selection.keyframe)
+            {
+                syncingNodeSelection = true;
+                nodeTable->selectRow (selection.keyframe, false);
+                syncingNodeSelection = false;
+            }
+
+            nodeTable->repaint();
+        }
     }
 
     std::function<void()> onEdited;
@@ -394,6 +586,7 @@ private:
     bool isReceiver = false;
     int index = 0;
     bool editingCheckpointSliders = false;
+    int checkpointSectionRow = -1;
 
     std::vector<Row> rows;
     std::vector<juce::Rectangle<int>> rowBounds;
@@ -417,6 +610,12 @@ private:
 
     /* Path controls. */
     std::unique_ptr<juce::TableListBox> nodeTable;
+    ButtonStrip nodeButtonStrip;
+    juce::TextButton addNodeButton { "Add node" };
+    juce::TextButton deleteNodeButton { "Delete node" };
+    int nodeRowCount = -1;
+    int nodeCellsEditing = 0;
+    bool syncingNodeSelection = false;
     juce::ToggleButton pathEnabledToggle;
     juce::ToggleButton pathLoopToggle;
     juce::Slider pathStartSlider;
@@ -958,18 +1157,37 @@ private:
         nodeTable->setRowHeight (18);
         nodeTable->setHeaderHeight (16);
         nodeTable->getHeader().addColumn ("#", 1, 28);
-        nodeTable->getHeader().addColumn ("Time", 2, 62);
-        nodeTable->getHeader().addColumn ("X", 3, 46);
-        nodeTable->getHeader().addColumn ("Y", 4, 46);
-        nodeTable->getHeader().addColumn ("Z", 5, 46);
+        nodeTable->getHeader().addColumn ("Time", 2, 74);
+        nodeTable->getHeader().addColumn ("X", 3, 44);
+        nodeTable->getHeader().addColumn ("Y", 4, 44);
+        nodeTable->getHeader().addColumn ("Z", 5, 44);
         nodeTable->getHeader().addColumn ("Stop", 6, 50);
         nodeTable->getHeader().setStretchToFitActive (true);
         nodeTable->setClickingTogglesRowSelection (true);
+        nodeTable->setTooltip ("Double-click a value to edit it. Times are "
+                               "absolute host time; X/Y/Z are metres.");
         addAndMakeVisible (*nodeTable);
         addControl ("Nodes", *nodeTable, 0, 200);
 
+        nodeRowCount = (int) count;
+        nodeTable->updateContent();
+
+        addNodeButton.setTooltip ("Insert a node after the selected one, or "
+                                  "append one to the end of the path.");
+        addNodeButton.onClick = [this] { addNode(); };
+        deleteNodeButton.setTooltip ("Remove the selected node from the path.");
+        deleteNodeButton.onClick = [this] { deleteSelectedNode(); };
+
+        nodeButtonStrip.add (addNodeButton);
+        nodeButtonStrip.add (deleteNodeButton);
+        addControl ("", nodeButtonStrip, 0, 30);
+
         if (selection.isCheckpoint())
-            nodeTable->selectRow (selection.keyframe, juce::dontSendNotification);
+        {
+            syncingNodeSelection = true;
+            nodeTable->selectRow (selection.keyframe, false);
+            syncingNodeSelection = false;
+        }
 
         if (count == 0)
             addNote ("Draw a spline in the canvas with the Draw Spline tool, "
@@ -1002,6 +1220,7 @@ private:
         addSection ("Checkpoint " + juce::String (selection.keyframe + 1)
                       + " of " + juce::String ((int) count),
                     getPathColour (isReceiver, index));
+        checkpointSectionRow = (int) rows.size() - 1;
 
         if (! valid)
         {
@@ -1243,6 +1462,331 @@ private:
                  "to the encoded ambisonic bus.");
     }
 
+    /* ----------------------------------------------------------------------- */
+    /* All-nodes table model                                                   */
+
+    /* Pure formatting: callers must hold the path lock. Column 2 is absolute
+       host time (startTime + the node's relative offset), which matches the
+       "Time" value shown for the selected checkpoint in the inspector. */
+    juce::String formatNodeCell (const PathData& path, int row, int columnId) const
+    {
+        if (row < 0 || row >= (int) path.keyframes.size())
+            return {};
+
+        const auto& kf = path.keyframes[(size_t) row];
+
+        switch (columnId)
+        {
+            case 1:  return juce::String (row + 1);
+            case 2:  return juce::String (path.startTime + kf.timeSeconds, 3);
+            case 3:  return juce::String (kf.x, 2);
+            case 4:  return juce::String (kf.y, 2);
+            case 5:  return juce::String (kf.z, 2);
+            case 6:  return juce::String (kf.stopTime, 2);
+            default: return {};
+        }
+    }
+
+    juce::String nodeCellValue (int row, int columnId)
+    {
+        const juce::SpinLock::ScopedLockType sl (processor.getPathLock());
+        return formatNodeCell (currentPath(), row, columnId);
+    }
+
+    /* Writes one edited cell back into the path. Time edits are clamped
+       between the neighbouring nodes so the keyframes stay ordered; position
+       edits are clamped to the room, like the checkpoint sliders; a new stop
+       time shifts every later node and the path end, like the Pause slider. */
+    void commitNodeEdit (int row, int columnId, const juce::String& text)
+    {
+        if (! hasObject || text.trim().isEmpty())
+            return;
+
+        const double value = text.getDoubleValue();
+        bool changed = false;
+
+        {
+            const juce::SpinLock::ScopedLockType sl (processor.getPathLock());
+            PathData& path = currentPath();
+
+            if (row < 0 || row >= (int) path.keyframes.size())
+                return;
+
+            auto& keyframe = path.keyframes[(size_t) row];
+
+            switch (columnId)
+            {
+                case 2:
+                {
+                    const double minRel = row > 0
+                        ? path.keyframes[(size_t) row - 1].timeSeconds + 0.001
+                        : 0.0;
+                    const double maxRel = row + 1 < (int) path.keyframes.size()
+                        ? path.keyframes[(size_t) row + 1].timeSeconds - 0.001
+                        : std::numeric_limits<double>::max();
+
+                    const double rel = juce::jlimit (minRel,
+                                                     juce::jmax (minRel, maxRel),
+                                                     value - path.startTime);
+
+                    if (std::abs (rel - keyframe.timeSeconds) > 1.0e-9)
+                    {
+                        keyframe.timeSeconds = rel;
+
+                        const double neededEnd = path.startTime + rel
+                                               + (double) keyframe.stopTime + 0.001;
+                        if (neededEnd > path.endTime)
+                            path.endTime = neededEnd;
+
+                        changed = true;
+                    }
+                    break;
+                }
+
+                case 3:
+                case 4:
+                case 5:
+                {
+                    const float roomDim = columnId == 3
+                        ? processor.getParameterFloat ("roomX")
+                        : columnId == 4 ? processor.getParameterFloat ("roomY")
+                                        : processor.getParameterFloat ("roomZ");
+                    const float v = juce::jlimit (0.0f, juce::jmax (0.01f, roomDim),
+                                                  (float) value);
+                    float& target = columnId == 3 ? keyframe.x
+                                  : columnId == 4 ? keyframe.y
+                                                  : keyframe.z;
+
+                    if (std::abs (target - v) > 1.0e-6f)
+                    {
+                        target = v;
+                        path.recomputeDefaultTangent (row);
+                        changed = true;
+                    }
+                    break;
+                }
+
+                case 6:
+                {
+                    const float newStop = (float) juce::jmax (0.0, value);
+                    const double delta = (double) newStop - (double) keyframe.stopTime;
+
+                    if (std::abs (delta) > 1.0e-9)
+                    {
+                        keyframe.stopTime = newStop;
+
+                        for (int j = row + 1; j < (int) path.keyframes.size(); ++j)
+                            path.keyframes[(size_t) j].timeSeconds += delta;
+
+                        path.endTime = juce::jmax (path.startTime + 0.1,
+                                                   path.endTime + delta);
+                        changed = true;
+                    }
+                    break;
+                }
+
+                default:
+                    break;
+            }
+        }
+
+        if (! changed)
+            return;
+
+        processor.markPathDirty();
+
+        if (onEdited)
+            onEdited();
+
+        if (nodeTable != nullptr)
+            nodeTable->repaint();
+    }
+
+    /* Inserts a node after the currently selected one (or appends at the
+       end). The new node copies the previous position and is placed halfway
+       to the next node, or one second after the last one. */
+    void addNode()
+    {
+        if (! hasObject)
+            return;
+
+        const float objectX = processor.getParameterFloat (roomAxisParameterID ('X'));
+        const float objectY = processor.getParameterFloat (roomAxisParameterID ('Y'));
+        const float objectZ = processor.getParameterFloat (roomAxisParameterID ('Z'));
+
+        int insertAt = 0;
+        {
+            const juce::SpinLock::ScopedLockType sl (processor.getPathLock());
+            const PathData& path = currentPath();
+            const int count = (int) path.keyframes.size();
+
+            if (count >= MAX_KEYFRAMES_PER_PATH)
+                return;
+
+            const int selected = nodeTable != nullptr ? nodeTable->getSelectedRow() : -1;
+            insertAt = (selected >= 0 && selected < count) ? selected + 1 : count;
+        }
+
+        bool added = false;
+
+        editPath ([&added, insertAt, objectX, objectY, objectZ] (PathData& path)
+                  {
+                      if ((int) path.keyframes.size() >= MAX_KEYFRAMES_PER_PATH)
+                          return;
+
+                      const int at = juce::jlimit (0, (int) path.keyframes.size(),
+                                                   insertAt);
+                      Keyframe kf;
+
+                      if (path.keyframes.empty())
+                      {
+                          kf.x = objectX;
+                          kf.y = objectY;
+                          kf.z = objectZ;
+                          kf.timeSeconds = 0.0;
+                      }
+                      else if (at > 0)
+                      {
+                          const auto& prev = path.keyframes[(size_t) at - 1];
+                          kf.x = prev.x;
+                          kf.y = prev.y;
+                          kf.z = prev.z;
+
+                          if (at < (int) path.keyframes.size())
+                              kf.timeSeconds = 0.5 * (prev.timeSeconds
+                                  + path.keyframes[(size_t) at].timeSeconds);
+                          else
+                              kf.timeSeconds = prev.timeSeconds + 1.0;
+                      }
+                      else
+                      {
+                          const auto& next = path.keyframes.front();
+                          kf.x = next.x;
+                          kf.y = next.y;
+                          kf.z = next.z;
+                          kf.timeSeconds = juce::jmax (0.0, next.timeSeconds - 1.0);
+                      }
+
+                      path.keyframes.insert (path.keyframes.begin() + at, kf);
+                      path.recomputeDefaultTangent (at);
+                      if (at > 0)
+                          path.recomputeDefaultTangent (at - 1);
+                      if (at + 1 < (int) path.keyframes.size())
+                          path.recomputeDefaultTangent (at + 1);
+
+                      path.enabled = true;
+
+                      if (path.startTime + path.keyframes[(size_t) at].timeSeconds
+                              >= path.endTime - 0.05)
+                          path.endTime = path.startTime
+                                       + path.keyframes[(size_t) at].timeSeconds
+                                       + 1.0;
+
+                      added = true;
+                  },
+                  true);
+
+        if (! added)
+            return;
+
+        const int newRow = juce::jlimit (0, MAX_KEYFRAMES_PER_PATH - 1, insertAt);
+        if (onSelectionRequested)
+            onSelectionRequested (studio::Selection::checkpoint (isReceiver, index,
+                                                                newRow));
+
+        if (onStructureChanged)
+            onStructureChanged();
+    }
+
+    /* Removes the selected node and selects the previous one (or the object
+       itself when the path becomes empty). */
+    void deleteSelectedNode()
+    {
+        if (! hasObject)
+            return;
+
+        int row = nodeTable != nullptr ? nodeTable->getSelectedRow() : -1;
+        if (row < 0 && selection.isCheckpoint())
+            row = selection.keyframe;
+
+        {
+            const juce::SpinLock::ScopedLockType sl (processor.getPathLock());
+            if (row < 0 || row >= (int) currentPath().keyframes.size())
+                return;
+        }
+
+        bool removed = false;
+        int remaining = 0;
+
+        editPath ([row, &removed, &remaining] (PathData& path)
+                  {
+                      if (row < 0 || row >= (int) path.keyframes.size())
+                          return;
+
+                      path.keyframes.erase (path.keyframes.begin() + row);
+                      removed = true;
+                      remaining = (int) path.keyframes.size();
+
+                      if (path.keyframes.empty())
+                      {
+                          path.enabled = false;
+                          path.loop = false;
+                      }
+                  },
+                  true);
+
+        if (! removed)
+            return;
+
+        if (onSelectionRequested)
+        {
+            if (remaining > 0)
+                onSelectionRequested (studio::Selection::checkpoint (
+                    isReceiver, index, juce::jlimit (0, remaining - 1, row - 1)));
+            else
+                onSelectionRequested (isReceiver
+                                          ? studio::Selection::receiver (index)
+                                          : studio::Selection::source (index));
+        }
+
+        if (onStructureChanged)
+            onStructureChanged();
+    }
+
+    /* Starts editing the cell that was double-clicked. The row itself is
+       selected on mouse-down, so this normally runs on an already-selected
+       row and does not trigger an inspector rebuild. */
+    void cellDoubleClicked (int rowNumber, int columnId,
+                            const juce::MouseEvent&) override
+    {
+        startCellEdit (rowNumber, columnId);
+    }
+
+    void startCellEdit (int rowNumber, int columnId)
+    {
+        if (nodeTable == nullptr || columnId < 2 || columnId > 6)
+            return;
+
+        if (nodeTable->getSelectedRow() != rowNumber)
+        {
+            nodeTable->selectRow (rowNumber, false);
+            return;
+        }
+
+        if (auto* rowComponent = nodeTable->getComponentForRowNumber (rowNumber))
+        {
+            for (auto* child : rowComponent->getChildren())
+            {
+                if ((int) child->getProperties()["_tableColumnId"] == columnId)
+                {
+                    if (auto* cell = dynamic_cast<NodeCellEditor*> (child))
+                        cell->startEditing();
+                    break;
+                }
+            }
+        }
+    }
+
     /* TableListBoxModel for the all-nodes table. */
     int getNumRows() override
     {
@@ -1254,68 +1798,123 @@ private:
     }
 
     void paintRowBackground (juce::Graphics& g, int rowNumber, int /*width*/,
-                             int /*height*/, bool rowIsSelected) override
+                             int height, bool rowIsSelected) override
     {
+        if (rowNumber < 0)
+            return;
+
         if (rowIsSelected)
             g.fillAll (studio::Colours::accentDim);
         else if (rowNumber % 2 == 0)
             g.fillAll (studio::Colours::surface);
         else
             g.fillAll (studio::Colours::panel);
-    }
 
-    void paintCell (juce::Graphics& g, int rowNumber, int columnId,
-                    int width, int height, bool /*rowIsSelected*/) override
-    {
-        const juce::SpinLock::ScopedLockType sl (processor.getPathLock());
-        const PathData& path = currentPath();
-        if (rowNumber < 0 || rowNumber >= (int) path.keyframes.size())
+        /* TableListBox only calls paintCell() for columns without a custom
+           component. The editable columns have a cell overlay, so the row
+           paints every value here instead. */
+        if (nodeTable == nullptr)
             return;
 
-        const auto& kf = path.keyframes[(size_t) rowNumber];
+        const juce::SpinLock::ScopedLockType sl (processor.getPathLock());
+        const PathData& path = currentPath();
 
-        juce::String text;
-        if (columnId == 1)
-            text = juce::String (rowNumber + 1);
-        else if (columnId == 2)
-            text = juce::String (kf.timeSeconds, 2);
-        else if (columnId == 3)
-            text = juce::String (kf.x, 2);
-        else if (columnId == 4)
-            text = juce::String (kf.y, 2);
-        else if (columnId == 5)
-            text = juce::String (kf.z, 2);
-        else if (columnId == 6)
-            text = juce::String (kf.stopTime, 2);
+        if (rowNumber >= (int) path.keyframes.size())
+            return;
+
+        auto& header = nodeTable->getHeader();
+        const int numColumns = header.getNumColumns (true);
 
         g.setColour (studio::Colours::text);
         g.setFont (studio::uiFont (10.5f));
-        g.drawText (text, 4, 0, width - 8, height,
-                    juce::Justification::centredLeft, true);
+
+        for (int i = 0; i < numColumns; ++i)
+        {
+            const int columnId = header.getColumnIdOfIndex (i, true);
+            const auto text = formatNodeCell (path, rowNumber, columnId);
+
+            if (text.isEmpty())
+                continue;
+
+            g.drawText (text,
+                        header.getColumnPosition (i).withHeight (height).reduced (4, 0),
+                        juce::Justification::centredLeft, true);
+        }
     }
 
-    juce::Component* refreshComponentForCell (int /*rowNumber*/, int /*columnId*/,
-                                            bool /*isRowSelected*/,
-                                            juce::Component* existingComponentToUpdate) override
+    void paintCell (juce::Graphics&, int, int, int, int, bool) override
     {
-        /* Read-only table: no inline editors. */
-        delete existingComponentToUpdate;
-        return nullptr;
+        /* See paintRowBackground(): all values are drawn there. */
+    }
+
+    juce::Component* refreshComponentForCell (int rowNumber, int columnId,
+                                              bool /*isRowSelected*/,
+                                              juce::Component* existingComponentToUpdate) override
+    {
+        /* Column 1 is the read-only index; columns 2-6 are editable. */
+        if (columnId < 2 || columnId > 6)
+        {
+            delete existingComponentToUpdate;
+            return nullptr;
+        }
+
+        auto* editor = dynamic_cast<NodeCellEditor*> (existingComponentToUpdate);
+
+        if (editor == nullptr)
+        {
+            delete existingComponentToUpdate;
+            editor = new NodeCellEditor();
+
+            editor->getValue = [this] (int row, int column)
+            {
+                return nodeCellValue (row, column);
+            };
+
+            editor->onCommit = [this] (int row, int column, const juce::String& text)
+            {
+                commitNodeEdit (row, column, text);
+            };
+
+            editor->onEditingChanged = [this] (bool editing)
+            {
+                nodeCellsEditing = juce::jmax (0, nodeCellsEditing + (editing ? 1 : -1));
+            };
+        }
+
+        /* A cell can be recycled onto another row while its editor is open
+           (the user scrolls the table). Commit first so a typed value never
+           lands on a different node. */
+        if (editor != nullptr && editor->isEditingCell())
+            editor->commitNow();
+
+        editor->row = rowNumber;
+        editor->columnId = columnId;
+        return editor;
     }
 
     void selectedRowsChanged (int lastRowSelected) override
     {
-        if (! hasObject || lastRowSelected < 0)
+        if (syncingNodeSelection || ! hasObject || lastRowSelected < 0)
             return;
 
-        const juce::SpinLock::ScopedLockType sl (processor.getPathLock());
-        const PathData& path = currentPath();
-        if (lastRowSelected >= (int) path.keyframes.size())
+        int numKeyframes = 0;
+        {
+            const juce::SpinLock::ScopedLockType sl (processor.getPathLock());
+            numKeyframes = (int) currentPath().keyframes.size();
+        }
+
+        if (lastRowSelected >= numKeyframes)
             return;
 
         if (onSelectionRequested)
             onSelectionRequested (studio::Selection::checkpoint (isReceiver, index,
                                                                 lastRowSelected));
+    }
+
+    void deleteKeyPressed (int lastRowSelected) override
+    {
+        if (lastRowSelected >= 0)
+            deleteSelectedNode();
     }
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Content)
@@ -1329,6 +1928,7 @@ InspectorPanel::InspectorPanel (PluginProcessor& p)
     setOpaque (true);
 
     inspectorTabButton.setClickingTogglesState (true);
+    roomTabButton.setClickingTogglesState (true);
     motionTabButton.setClickingTogglesState (true);
     inspectorTabButton.setToggleState (true, juce::dontSendNotification);
 
@@ -1336,6 +1936,16 @@ InspectorPanel::InspectorPanel (PluginProcessor& p)
     {
         activeTab = Tab::inspector;
         inspectorTabButton.setToggleState (true, juce::dontSendNotification);
+        roomTabButton.setToggleState (false, juce::dontSendNotification);
+        motionTabButton.setToggleState (false, juce::dontSendNotification);
+        rebuild();
+    };
+
+    roomTabButton.onClick = [this]
+    {
+        activeTab = Tab::room;
+        inspectorTabButton.setToggleState (false, juce::dontSendNotification);
+        roomTabButton.setToggleState (true, juce::dontSendNotification);
         motionTabButton.setToggleState (false, juce::dontSendNotification);
         rebuild();
     };
@@ -1344,11 +1954,13 @@ InspectorPanel::InspectorPanel (PluginProcessor& p)
     {
         activeTab = Tab::motion;
         inspectorTabButton.setToggleState (false, juce::dontSendNotification);
+        roomTabButton.setToggleState (false, juce::dontSendNotification);
         motionTabButton.setToggleState (true, juce::dontSendNotification);
         rebuild();
     };
 
     addAndMakeVisible (inspectorTabButton);
+    addAndMakeVisible (roomTabButton);
     addAndMakeVisible (motionTabButton);
 
     viewport.setScrollBarsShown (true, false);
@@ -1391,8 +2003,9 @@ void InspectorPanel::resized()
     area.removeFromTop (headerHeight);
 
     auto tabArea = area.removeFromTop (28);
-    const int tabWidth = juce::jmax (60, tabArea.getWidth() / 2);
+    const int tabWidth = juce::jmax (60, tabArea.getWidth() / 3);
     inspectorTabButton.setBounds (tabArea.removeFromLeft (tabWidth).reduced (4, 3));
+    roomTabButton.setBounds (tabArea.removeFromLeft (tabWidth).reduced (4, 3));
     motionTabButton.setBounds (tabArea.reduced (4, 3));
 
     viewport.setBounds (area);
@@ -1409,7 +2022,23 @@ void InspectorPanel::setSelection (const studio::Selection& newSelection)
     if (selection == newSelection)
         return;
 
+    /* Moving between checkpoints of the same actor only changes the
+       checkpoint controls. Updating in place (rather than rebuilding the
+       whole panel) keeps the node table, its scroll position and an open
+       cell editor alive. */
+    const bool sameActorCheckpoint = selection.isCheckpoint()
+        && newSelection.isCheckpoint()
+        && selection.checkpointIsReceiver == newSelection.checkpointIsReceiver
+        && selection.index == newSelection.index;
+
     selection = newSelection;
+
+    if (sameActorCheckpoint && content != nullptr)
+    {
+        content->updateSelection (newSelection);
+        return;
+    }
+
     rebuild();
 }
 

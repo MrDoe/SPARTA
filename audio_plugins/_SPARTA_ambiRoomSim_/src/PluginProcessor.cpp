@@ -73,6 +73,19 @@ void PluginProcessor::logPathState(const char* where) const
     std::fclose(f);
 }
 
+/* Index of a parameter in the AudioProcessor's flat parameter list. Hosts
+   address automation by this index, so it is the thing that must stay stable
+   across releases (see the deprecated pathEnable/pathLoop dummies below). */
+static int parameterIndexOf (const juce::AudioProcessor& processor,
+                             juce::AudioProcessorValueTreeState& state,
+                             const juce::String& parameterID)
+{
+    if (auto* parameter = state.getParameter (parameterID))
+        return processor.getParameters().indexOf (parameter);
+
+    return -1;
+}
+
 static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
@@ -106,6 +119,17 @@ static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
                                                                AudioParameterIntAttributes().withAutomatable(false)));
     params.push_back(std::make_unique<juce::AudioParameterInt>("numReceivers", "NumReceivers", 1, ROOM_SIM_MAX_NUM_RECEIVERS, ambi_roomsim_defaultNumReceivers,
                                                                AudioParameterIntAttributes().withAutomatable(false)));
+    /* Deprecated, inert parameters. They were removed when the per-path
+       `enabled`/`loop` flags replaced the global automation gate, but hosts
+       address parameters by *index*: dropping them shifted every following
+       parameter by two slots and broke automation and old sessions saved by
+       1.8.x. Keep them in their original positions (between numReceivers and
+       pathTimeOffset) so the layout stays byte-for-byte compatible. Nothing
+       reads them; parameterChanged() ignores them on purpose. */
+    params.push_back(std::make_unique<juce::AudioParameterBool>("pathEnable", "PathEnable", false,
+                                                                 AudioParameterBoolAttributes().withAutomatable(false)));
+    params.push_back(std::make_unique<juce::AudioParameterBool>("pathLoop", "PathLoop", false,
+                                                                AudioParameterBoolAttributes().withAutomatable(false)));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("pathTimeOffset", "PathTimeOffset",
                                                                  juce::NormalisableRange<float>(-3600.0f, 3600.0f, 0.01f), 0.0f,
                                                                  AudioParameterFloatAttributes().withAutomatable(false)));
@@ -294,6 +318,14 @@ PluginProcessor::PluginProcessor()
 {
     ambi_roomsim_create(&hAmbi);
     addParameterListeners(this);
+
+    /* Automation compatibility contract with 1.8.x. Hosts address
+       parameters by index, not by ID, so the two deprecated dummies must
+       keep their original slots. If this ever fires, an old session's
+       automation will be mapped onto the wrong parameters. */
+    jassert (parameterIndexOf (*this, parameters, "pathEnable") == 16);
+    jassert (parameterIndexOf (*this, parameters, "pathLoop") == 17);
+    jassert (parameterIndexOf (*this, parameters, "sourceX0") == 20);
 
     trackFormatManager.registerBasicFormats();
     cachePositionParameters();
@@ -655,6 +687,117 @@ AudioProcessorEditor* PluginProcessor::createEditor()
 {
     return new PluginEditor (*this);
 }
+
+juce::ValueTree PluginProcessor::captureEditorState()
+{
+    juce::ValueTree state("EDITOR_STATE");
+
+    {
+        const juce::SpinLock::ScopedLockType sl(pathLock);
+        state.addChild(pathBank.toValueTree(0), -1, nullptr);
+    }
+
+    {
+        const juce::ScopedLock sl(sceneLock);
+        auto sceneState = sceneModel.toValueTree(0);
+
+        /* View preferences (grid, labels, font size) are not document edits:
+           keep them out of undo snapshots so undoing a scene edit never
+           changes the UI setup. restoreEditorState() leaves them untouched. */
+        while (sceneState.getChildWithName("UI").isValid())
+            sceneState.removeChild(sceneState.getChildWithName("UI"), nullptr);
+
+        state.addChild(sceneState, -1, nullptr);
+    }
+
+    auto parameterState = parameters.copyState();
+
+    /* setStateInformation() replaces the APVTS state with the whole host
+       tree, whose root is AMBIROOMSIMPLUGINSETTINGS rather than the usual
+       "Parameters" node. Normalise the type so snapshots captured before
+       and after a host restore remain interchangeable. */
+    if (! parameterState.hasType("Parameters"))
+    {
+        juce::ValueTree normalized("Parameters");
+        for (int i = 0; i < parameterState.getNumChildren(); ++i)
+            normalized.addChild(parameterState.getChild(i).createCopy(), -1, nullptr);
+        parameterState = normalized;
+    }
+
+    /* These two are serialized separately by getStateInformation() and must
+       never travel inside the APVTS tree (see setStateInformation). */
+    while (parameterState.getChildWithName("PATHS").isValid())
+        parameterState.removeChild(parameterState.getChildWithName("PATHS"), nullptr);
+    while (parameterState.getChildWithName("SCENE").isValid())
+        parameterState.removeChild(parameterState.getChildWithName("SCENE"), nullptr);
+
+    state.addChild(parameterState, -1, nullptr);
+    return state;
+}
+
+void PluginProcessor::restoreEditorState(const juce::ValueTree& state)
+{
+    if (! state.hasType("EDITOR_STATE"))
+        return;
+
+    /* Restore the parameters one by one through setParameterValue() so the
+       host is notified of every changed value (replaceState() would update
+       the tree silently) and parameterChanged() updates the DSP. */
+    auto parameterState = state.getChildWithName("Parameters");
+    if (! parameterState.isValid())
+        parameterState = state.getChildWithName("AMBIROOMSIMPLUGINSETTINGS");
+
+    if (parameterState.isValid())
+    {
+        for (int i = 0; i < parameterState.getNumChildren(); ++i)
+        {
+            const auto child = parameterState.getChild(i);
+            if (! child.hasProperty("id") || ! child.hasProperty("value"))
+                continue;
+
+            setParameterValue(child.getProperty("id").toString(),
+                              (float) (double) child.getProperty("value"));
+        }
+
+        setInternalStateUsingParameterValues();
+    }
+
+    const auto paths = state.getChildWithName("PATHS");
+    if (paths.isValid())
+    {
+        {
+            const juce::SpinLock::ScopedLockType sl(pathLock);
+            pathBank.fromValueTree(paths);
+
+            int maxKf = 0;
+            for (int i = 0; i < ROOM_SIM_MAX_NUM_SOURCES; ++i)
+                maxKf = jmax(maxKf, (int) pathBank.getSourcePath(i).keyframes.size());
+            for (int i = 0; i < ROOM_SIM_MAX_NUM_RECEIVERS; ++i)
+                maxKf = jmax(maxKf, (int) pathBank.getReceiverPath(i).keyframes.size());
+            pathSnapshot.reserveKeyframeCapacity(maxKf);
+        }
+
+        /* Bumps the edit counter (audio thread picks up the restored bank)
+           and the state version (a stale host snapshot cannot overwrite the
+           undo). The host is notified once, at the end. */
+        markPathDirty(false);
+    }
+
+    const auto scene = state.getChildWithName("SCENE");
+    if (scene.isValid())
+    {
+        {
+            const juce::ScopedLock sl(sceneLock);
+            sceneModel.fromValueTree(scene);
+        }
+
+        markSceneDirty(false);
+    }
+
+    updateHostDisplay(juce::AudioProcessorListener::ChangeDetails{}
+                          .withParameterInfoChanged(true)
+                          .withNonParameterStateChanged(true));
+}
 void PluginProcessor::getStateInformation (MemoryBlock& destData)
 {
     juce::ValueTree state = parameters.copyState();
@@ -784,15 +927,6 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
             }
             while (state.getChildWithName("SCENE").isValid())
                 state.removeChild(state.getChildWithName("SCENE"), nullptr);
-            // Strip legacy dead params (pathEnable / pathLoop) removed in fix
-            for (int i = state.getNumChildren(); i-- > 0; ) {
-                auto c = state.getChild(i);
-                if (c.hasProperty("id")) {
-                    auto id = c.getProperty("id").toString();
-                    if (id == "pathEnable" || id == "pathLoop")
-                        state.removeChild(c, nullptr);
-                }
-            }
             parameters.replaceState(state);
             addParameterListeners(this);
 
@@ -864,6 +998,7 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
             loadTrackFile(juce::File(trackPath));
 
         ambi_roomsim_refreshParams(hAmbi);
+        stateRestoreCounter.fetch_add(1, std::memory_order_release);
     }
 }
 

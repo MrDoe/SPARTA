@@ -68,6 +68,16 @@ namespace Colours
     const juce::Colour floorFill    { 0xff0a171c };
 }
 
+/* Global text scale for the studio UI. Every studio font goes through
+   uiFont(), so changing this one value scales all labels, values and hints
+   without touching the individual controls. The value is persisted in
+   UiPreferences::fontScale. */
+inline float& uiFontScale()
+{
+    static float scale = 1.0f;
+    return scale;
+}
+
 /* Inter is bundled with the SPARTA resources; the plugin already links the
    GUI_fonts target, so no extra asset is needed. */
 inline juce::Font uiFont (float size, bool bold = false)
@@ -77,8 +87,10 @@ inline juce::Font uiFont (float size, bool bold = false)
     static auto boldFace = juce::Typeface::createSystemTypefaceFor (
         BinaryData::InterBold_ttf, BinaryData::InterBold_ttfSize);
 
+    const float scaled = juce::jmax (1.0f, size * uiFontScale());
+
     return juce::Font (juce::FontOptions (bold ? boldFace : regular)
-                           .withHeight (size)
+                           .withHeight (scaled)
                            .withKerningFactor (0.01f));
 }
 

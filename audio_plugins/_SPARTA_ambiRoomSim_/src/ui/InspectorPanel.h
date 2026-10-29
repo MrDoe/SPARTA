@@ -36,6 +36,7 @@ public:
     enum class Tab
     {
         inspector,
+        room,
         motion
     };
 
@@ -66,6 +67,7 @@ private:
     studio::Selection selection;
     Tab activeTab = Tab::inspector;
     juce::TextButton inspectorTabButton { "Inspector" };
+    juce::TextButton roomTabButton { "Room" };
     juce::TextButton motionTabButton { "Motion" };
     juce::Viewport viewport;
     std::unique_ptr<Content> content;

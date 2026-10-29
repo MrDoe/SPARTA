@@ -94,8 +94,30 @@ private:
     juce::Button* primitivesButton = nullptr;
     juce::SharedResourcePointer<juce::TooltipWindow> tooltipWindow;
 
+    /* Snapshot-based undo/redo. Each entry is the complete editor state
+       (parameters, paths and scene metadata) before an edit. Edits are
+       coalesced for a moment so one mouse drag becomes one undo step. */
+    struct EditorUndoHistory
+    {
+        std::vector<juce::ValueTree> undoStack;
+        std::vector<juce::ValueTree> redoStack;
+        juce::ValueTree lastState;
+
+        void reset (PluginProcessor& processor);
+        void sync (PluginProcessor& processor);
+        void checkpoint (PluginProcessor& processor);
+        bool undo (PluginProcessor& processor);
+        bool redo (PluginProcessor& processor);
+        bool canUndo() const { return ! undoStack.empty(); }
+        bool canRedo() const { return ! redoStack.empty(); }
+    };
+
     studio::Selection selection;
     Warning currentWarning = Warning::none;
+    EditorUndoHistory undoHistory;
+    bool undoCheckpointPending = false;
+    juce::uint32 lastEditTimeMs = 0;
+    int lastStateRestoreCounter = 0;
 
     double previewTime = 0.0;
     bool previewActive = false;
@@ -138,6 +160,14 @@ private:
     void setFullScreenMode (bool shouldBeFullScreen);
     void showSettingsMenu();
     void showPrimitivesMenu();
+    void noteEdit();
+    void flushUndoCheckpoint();
+    void undo();
+    void redo();
+    void applyRestoredState();
+    void handleHostStateRestore();
+    void sanitizeSelection();
+    void setFontScale (float scale);
     void refreshSummary();
     juce::String buildSummary() const;
     juce::String buildOutputSummary() const;

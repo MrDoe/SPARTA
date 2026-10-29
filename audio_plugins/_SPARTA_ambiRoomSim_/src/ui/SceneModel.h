@@ -55,6 +55,9 @@ struct UiPreferences
     bool showGrid = true;
     bool showLabels = true;
     bool snap = false;
+    /* Global text scale for the studio UI. All studio text is drawn through
+       studio::uiFont(), so this one value scales the whole interface. */
+    float fontScale = 1.0f;
 };
 
 /* Mirrors ROOM_SIM_MAX_NUM_SOURCES and ROOM_SIM_MAX_NUM_RECEIVERS in the DSP

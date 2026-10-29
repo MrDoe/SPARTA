@@ -115,6 +115,7 @@ juce::ValueTree SceneModel::toValueTree (int version) const
     prefs.setProperty ("showGrid", ui.showGrid, nullptr);
     prefs.setProperty ("showLabels", ui.showLabels, nullptr);
     prefs.setProperty ("snap", ui.snap, nullptr);
+    prefs.setProperty ("fontScale", ui.fontScale, nullptr);
     state.addChild (prefs, -1, nullptr);
 
     return state;
@@ -160,6 +161,8 @@ void SceneModel::fromValueTree (const juce::ValueTree& state)
             ui.showGrid = (bool) child.getProperty ("showGrid", true);
             ui.showLabels = (bool) child.getProperty ("showLabels", true);
             ui.snap = (bool) child.getProperty ("snap", false);
+            ui.fontScale = juce::jlimit (0.8f, 1.35f,
+                                         (float) (double) child.getProperty ("fontScale", 1.0));
         }
     }
 }
