@@ -41,7 +41,7 @@ namespace
         Vec3 position;          /* acoustic point */
         Vec3 base;              /* mesh origin */
         const ActorDefinition* definition = nullptr;
-        float yawRadians = 0.0f;
+        float facingRadians = 0.0f; /* azimuth: 0 = front wall */
         float scale = 1.0f;
         juce::String label;
         juce::Colour colour;
@@ -259,8 +259,9 @@ namespace
         }
     }
 
-    /* Receiver orientation. Actors are authored facing +y, so the yaw turns
-       that into (-sin, cos). The arrow lies on the floor just beyond the
+    /* Receiver orientation. Facing is a standard azimuth measured from the
+       front wall (-y), so the arrow points along (sin, -cos): 0 = -y,
+       +90 = +x, +/-180 = +y. The arrow lies on the floor just beyond the
        shadow disc and is drawn before the meshes, which keeps it occluded
        correctly when the listener turns away from the camera. */
     void drawListenerDirection (juce::Graphics& g, const Camera& camera,
@@ -272,8 +273,8 @@ namespace
         const float scale = juce::jlimit (0.4f, 2.5f, actor.scale);
         const float footprint = juce::jmax (0.18f, actor.definition->footprint) * scale;
 
-        const Vec3 forward (-std::sin (actor.yawRadians),
-                             std::cos (actor.yawRadians), 0.0f);
+        const Vec3 forward (std::sin (actor.facingRadians),
+                            -std::cos (actor.facingRadians), 0.0f);
         const Vec3 side (forward.y, -forward.x, 0.0f);
 
         const float z = 0.015f;
@@ -481,7 +482,7 @@ namespace
                 actor.position = position;
                 actor.base = definition.aerial ? position : Vec3 (position.x, position.y, 0.0f);
                 actor.definition = &definition;
-                actor.yawRadians = juce::degreesToRadians (info.yawDegrees);
+                actor.facingRadians = juce::degreesToRadians (info.facingDegrees);
                 actor.scale = juce::jlimit (0.25f, 3.0f, info.scale);
                 actor.colour = getPathColour (isReceiver, i);
                 actor.selected = actor.selection == selection;
@@ -548,8 +549,12 @@ namespace
             if (mesh.vertices.empty())
                 continue;
 
-            const float c = std::cos (actor.yawRadians);
-            const float s = std::sin (actor.yawRadians);
+            /* Actor meshes are authored facing +y, but facing 0 points at
+               the front wall (-y); rotate by facing + 180 degrees. */
+            const float meshRotation = actor.facingRadians
+                                         + juce::MathConstants<float>::pi;
+            const float c = std::cos (meshRotation);
+            const float s = std::sin (meshRotation);
             const float scale = actor.scale;
 
             std::vector<Vec3> transformed;

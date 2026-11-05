@@ -605,7 +605,7 @@ private:
     /* Actor casting controls (scene metadata, not parameters). */
     juce::ComboBox actorKindCombo;
     juce::TextEditor actorNameEditor;
-    juce::Slider yawSlider;
+    juce::Slider facingSlider;
     juce::Slider scaleSlider;
 
     /* Path controls. */
@@ -940,16 +940,16 @@ private:
         addAndMakeVisible (actorNameEditor);
         rows.push_back (nameRow);
 
-        configureCustomSlider (yawSlider, -180.0, 180.0, 1.0, info.yawDegrees,
+        configureCustomSlider (facingSlider, -180.0, 180.0, 1.0, info.facingDegrees,
                                " deg", 50);
-        yawSlider.onValueChange = [this]
+        facingSlider.onValueChange = [this]
         {
-            const float value = (float) yawSlider.getValue();
-            editActor ([value] (studio::ActorInfo& actor) { actor.yawDegrees = value; },
+            const float value = (float) facingSlider.getValue();
+            editActor ([value] (studio::ActorInfo& actor) { actor.facingDegrees = value; },
                        false);
         };
-        yawSlider.onDragEnd = [this] { processor.markSceneDirty(); };
-        addControl ("Facing", yawSlider);
+        facingSlider.onDragEnd = [this] { processor.markSceneDirty(); };
+        addControl ("Facing", facingSlider);
 
         configureCustomSlider (scaleSlider, 0.4, 2.5, 0.05, info.scale,
                                " x", 50);
@@ -968,13 +968,16 @@ private:
 
         addValue ("Directivity", "Omnidirectional");
         if (isReceiver)
-            addNote ("The image-source receiver is omnidirectional. Facing rotates "
-                     "this receiver's Ambisonic output, so the whole scene turns "
-                     "around the listener; 180 deg is the unchanged reference. "
-                     "Doppler is not modelled.");
+            addNote ("The image-source receiver is omnidirectional. Facing turns "
+                     "this receiver and rotates its Ambisonic output to match, so "
+                     "sources stay fixed in the room while the whole scene turns "
+                     "around the listener. 0 deg faces the front wall, +90 deg "
+                     "left, -90 deg right, 180 deg the back wall. Doppler is not "
+                     "modelled.");
         else
             addNote ("The image-source source radiates omnidirectionally; Facing "
-                     "is visual only for sources. Doppler is not modelled.");
+                     "is visual only for sources. 0 deg faces the front wall. "
+                     "Doppler is not modelled.");
 
         frameButton.onClick = [this]
         {

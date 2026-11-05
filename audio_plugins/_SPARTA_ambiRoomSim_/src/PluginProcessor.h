@@ -122,8 +122,8 @@ public:
     /* Scene metadata (actor casting, names, markers, view preferences).
        The audio thread never reads the SceneModel itself: the receiver
        facing angles are published into lock-free atomics by
-       syncReceiverYawFromScene(), which is called after every scene edit.
-       The version guard mirrors the path-bank guard so a stale host
+       syncReceiverFacingFromScene(), which is called after every scene
+       edit. The version guard mirrors the path-bank guard so a stale host
        snapshot cannot overwrite newer in-memory edits. */
     studio::SceneModel& getSceneModel() { return sceneModel; }
     const studio::SceneModel& getSceneModel() const { return sceneModel; }
@@ -134,19 +134,22 @@ public:
         /* The receiver facing is part of the audible state, so publish it
            whenever the scene changes. sceneLock is recursive, so callers
            that already hold it are fine. */
-        syncReceiverYawFromScene();
+        syncReceiverFacingFromScene();
         if (notifyHost)
             updateHostDisplay(juce::AudioProcessorListener::ChangeDetails{}
                                   .withNonParameterStateChanged(true));
     }
 
-    /* Listener facing. Each receiver's yaw is metadata, but it is not just
-       visual: processBlock() rotates that receiver's Ambisonic output by
-       (180 - yaw) degrees, so turning the listener turns the whole sound
-       field around it. 180 degrees is the unchanged reference. */
-    void setReceiverYawDegrees(int index, float degrees);
-    float getReceiverYawDegrees(int index) const;
-    void syncReceiverYawFromScene();
+    /* Listener facing. Each receiver's facing is a standard azimuth:
+       0 faces the front wall (-y), +90 faces +x (left) and +/-180 faces
+       the back wall (+y). It is not just visual: processBlock() rotates
+       that receiver's Ambisonic output by (90 - facing) degrees so the
+       drawn arrow always points at the decoder's front (+x). Turning the
+       listener therefore turns the whole sound field around it; facing
+       +90 (pointing at +x) is the no-rotation reference. */
+    void setReceiverFacingDegrees(int index, float degrees);
+    float getReceiverFacingDegrees(int index) const;
+    void syncReceiverFacingFromScene();
 
     /* Editor undo/redo. A snapshot contains the parameter values, the path
        bank and the scene metadata, i.e. everything the studio UI can edit.
@@ -248,12 +251,12 @@ private:
     std::array<PositionParams, ROOM_SIM_MAX_NUM_RECEIVERS> receiverParams;
     void cachePositionParameters();
 
-    /* Receiver facing -> Ambisonic rotation. The yaw values are written by
-       the message thread (scene edits) and read by the audio thread without
-       a lock. The rotation matrices are audio-thread-owned; prepareToPlay()
-       allocates the maximum size up-front so an output-order change never
-       has to allocate while processing. */
-    std::array<std::atomic<float>, ROOM_SIM_MAX_NUM_RECEIVERS> receiverYawDeg;
+    /* Receiver facing -> Ambisonic rotation. The azimuth values are written
+       by the message thread (scene edits) and read by the audio thread
+       without a lock. The rotation matrices are audio-thread-owned;
+       prepareToPlay() allocates the maximum size up-front so an
+       output-order change never has to allocate while processing. */
+    std::array<std::atomic<float>, ROOM_SIM_MAX_NUM_RECEIVERS> receiverFacingDeg;
     std::array<float, ROOM_SIM_MAX_NUM_RECEIVERS> receiverRotationAngle {};
     std::array<float, ROOM_SIM_MAX_NUM_RECEIVERS> receiverRotationApplied {};
     std::array<std::vector<float>, ROOM_SIM_MAX_NUM_RECEIVERS> receiverRotationMtx;

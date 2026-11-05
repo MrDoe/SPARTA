@@ -330,12 +330,12 @@ PluginProcessor::PluginProcessor()
     trackFormatManager.registerBasicFormats();
     cachePositionParameters();
 
-    /* Receiver facing defaults to 180 degrees, the unchanged reference
+    /* Receiver facing defaults to 0 degrees, facing the room's front wall
        (see SceneModel::reset). Publish the scene values so the audio thread
        has a valid snapshot before the first block. */
-    for (auto& yaw : receiverYawDeg)
-        yaw.store(180.0f, std::memory_order_relaxed);
-    syncReceiverYawFromScene();
+    for (auto& facing : receiverFacingDeg)
+        facing.store(0.0f, std::memory_order_relaxed);
+    syncReceiverFacingFromScene();
 
     /* Reserve the keyframe buffers of both the live bank and the snapshot
        that the audio thread uses, so that the copy it makes whenever a path
@@ -525,28 +525,28 @@ void PluginProcessor::applyPath(int index, const PathData& path, double t, bool 
     if (pp.z != nullptr) pp.z->setValue(pp.z->convertTo0to1(z));
 }
 
-void PluginProcessor::setReceiverYawDegrees (int index, float degrees)
+void PluginProcessor::setReceiverFacingDegrees (int index, float degrees)
 {
     if (index < 0 || index >= ROOM_SIM_MAX_NUM_RECEIVERS)
         return;
-    receiverYawDeg[(size_t) index].store (degrees, std::memory_order_relaxed);
+    receiverFacingDeg[(size_t) index].store (degrees, std::memory_order_relaxed);
 }
 
-float PluginProcessor::getReceiverYawDegrees (int index) const
+float PluginProcessor::getReceiverFacingDegrees (int index) const
 {
     if (index < 0 || index >= ROOM_SIM_MAX_NUM_RECEIVERS)
-        return 180.0f;
-    return receiverYawDeg[(size_t) index].load (std::memory_order_relaxed);
+        return 0.0f;
+    return receiverFacingDeg[(size_t) index].load (std::memory_order_relaxed);
 }
 
-void PluginProcessor::syncReceiverYawFromScene()
+void PluginProcessor::syncReceiverFacingFromScene()
 {
     /* Called on the message thread after every scene edit. The audio thread
        never touches the SceneModel; it only reads the atomics below. */
     const juce::ScopedLock sl (sceneLock);
     for (int i = 0; i < ROOM_SIM_MAX_NUM_RECEIVERS; ++i)
-        receiverYawDeg[(size_t) i].store (sceneModel.getActor (true, i).yawDegrees,
-                                          std::memory_order_relaxed);
+        receiverFacingDeg[(size_t) i].store (sceneModel.getActor (true, i).facingDegrees,
+                                             std::memory_order_relaxed);
 }
 
 void PluginProcessor::updateReceiverRotationMatrices (int numSamples)
@@ -574,10 +574,20 @@ void PluginProcessor::updateReceiverRotationMatrices (int numSamples)
 
     for (int i = 0; i < ROOM_SIM_MAX_NUM_RECEIVERS; ++i)
     {
-        /* 180 degrees is the unchanged reference (no rotation). Wrap the
-           target into [-180, 180) so dragging the Facing slider across
-           +/-180 degrees does not spin the scene all the way around. */
-        float targetDegrees = 180.0f - receiverYawDeg[(size_t) i].load (std::memory_order_relaxed);
+        /* The studio's listener arrow points along (sin(az), -cos(az)) for
+           the standard azimuth az: 0 faces the front wall (-y), +90 faces
+           +x (left) and +/-180 faces the back wall (+y). The Ambisonic
+           convention used by SAF/SOFA decoders is +x = front, +y = left,
+           so the field must be rotated by (90 - az) to put the arrow
+           direction on the decoder's front axis:
+               az    0      ->  +90 deg
+               az   90      ->    0 deg (facing +x; no rotation)
+               az  +/-180   ->  -90 deg
+               az  -90      -> +180 deg
+           Wrap the target into [-180, 180) so dragging the Facing slider
+           across +/-180 degrees does not spin the scene all the way
+           around. */
+        float targetDegrees = 90.0f - receiverFacingDeg[(size_t) i].load (std::memory_order_relaxed);
         targetDegrees = std::fmod (targetDegrees + 180.0f, 360.0f);
         if (targetDegrees < 0.0f)
             targetDegrees += 360.0f;
@@ -585,19 +595,30 @@ void PluginProcessor::updateReceiverRotationMatrices (int numSamples)
 
         const float target = juce::degreesToRadians (targetDegrees);
         float current = receiverRotationAngle[(size_t) i];
-        float delta = target - current;
 
-        /* Shortest way around the circle. */
-        delta = std::fmod (delta + juce::MathConstants<float>::pi,
-                           2.0f * juce::MathConstants<float>::pi);
-        if (delta < 0.0f)
-            delta += 2.0f * juce::MathConstants<float>::pi;
-        delta -= juce::MathConstants<float>::pi;
-
-        if (std::abs (delta) < 1.0e-4f)
+        if (receiverRotationApplied[(size_t) i] > 1.0e8f)
+        {
+            /* First block after prepareToPlay() or an order change: start
+               at the target instead of audibly gliding the field into
+               place. */
             current = target;
+        }
         else
-            current += delta * coefficient;
+        {
+            float delta = target - current;
+
+            /* Shortest way around the circle. */
+            delta = std::fmod (delta + juce::MathConstants<float>::pi,
+                               2.0f * juce::MathConstants<float>::pi);
+            if (delta < 0.0f)
+                delta += 2.0f * juce::MathConstants<float>::pi;
+            delta -= juce::MathConstants<float>::pi;
+
+            if (std::abs (delta) < 1.0e-4f)
+                current = target;
+            else
+                current += delta * coefficient;
+        }
 
         receiverRotationAngle[(size_t) i] = current;
 
@@ -987,7 +1008,7 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
 
             /* The facing angles are part of the restored scene; publish them
                so the next audio block rotates the receivers correctly. */
-            syncReceiverYawFromScene();
+            syncReceiverFacingFromScene();
         }
 
         /* Restore the reference track on initialization: kick off a decode

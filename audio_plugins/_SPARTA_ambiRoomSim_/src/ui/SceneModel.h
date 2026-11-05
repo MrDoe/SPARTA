@@ -31,15 +31,20 @@ namespace studio
 {
 
 /* Visual metadata for one source/receiver: which built-in actor represents
-   it, an optional display name, and a visual yaw/scale. The receiver yaw is
-   not purely cosmetic: the processor rotates that receiver's Ambisonic
-   output by (180 - yaw) degrees. Everything else is stored in the plug-in
-   state under a SCENE node so the casting survives save/reload. */
+   it, an optional display name, and a visual facing/scale. Facing is a
+   standard azimuth in degrees: 0 faces the front wall (-y), +90 faces +x
+   (left when looking at the front wall), +/-180 faces the back wall (+y),
+   and -90 faces -x (right). The receiver facing is not purely cosmetic:
+   the processor rotates that receiver's Ambisonic output so the drawn
+   facing arrow always matches the decoded front (see
+   PluginProcessor::updateReceiverRotationMatrices()). Everything else is
+   stored in the plug-in state under a SCENE node so the casting survives
+   save/reload. */
 struct ActorInfo
 {
     ActorKind kind = ActorKind::performer;
     juce::String name;
-    float yawDegrees = 0.0f;
+    float facingDegrees = 0.0f; /* azimuth: 0 = front wall, +90 = left */
     float scale = 1.0f;
 };
 

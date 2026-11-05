@@ -22,8 +22,25 @@
 
 #include "SceneModel.h"
 
+#include <cmath>
+
 namespace studio
 {
+
+namespace
+{
+    /* Wraps an azimuth into (-180, 180] so the Facing slider shows the
+       back wall as +180 rather than -180. */
+    float wrapFacingDegrees (float degrees)
+    {
+        degrees = std::fmod (degrees, 360.0f);
+        if (degrees <= -180.0f)
+            degrees += 360.0f;
+        else if (degrees > 180.0f)
+            degrees -= 360.0f;
+        return degrees;
+    }
+}
 
 SceneModel::SceneModel()
 {
@@ -48,10 +65,15 @@ void SceneModel::reset()
     for (size_t i = 5; i < sources.size(); ++i)
         sources[i].kind = ActorKind::marker;
 
+    /* Source meshes are authored facing +y, i.e. towards the back wall.
+       Keep that default look; facing 180 means "towards +y". */
+    for (auto& a : sources)
+        a.facingDegrees = 180.0f;
+
     for (auto& a : receivers)
     {
         a.kind = ActorKind::listener;
-        a.yawDegrees = 180.0f; /* face the front of the room */
+        a.facingDegrees = 0.0f; /* face the front wall (-y) */
     }
 
     markers.clear();
@@ -85,6 +107,11 @@ juce::ValueTree SceneModel::toValueTree (int version) const
     juce::ValueTree state ("SCENE");
     state.setProperty ("version", version, nullptr);
 
+    /* Facing marker: 1 = standard azimuth (0 faces the front wall). Scenes
+       written before this marker stored the old visual yaw, where 0 pointed
+       to +y; fromValueTree() converts those by subtracting 180 degrees. */
+    state.setProperty ("facingConvention", 1, nullptr);
+
     for (int i = 0; i < maxSceneObjects; ++i)
     {
         for (int side = 0; side < 2; ++side)
@@ -96,7 +123,7 @@ juce::ValueTree SceneModel::toValueTree (int version) const
             node.setProperty ("index", i, nullptr);
             node.setProperty ("kind", toString (actor.kind), nullptr);
             node.setProperty ("name", actor.name, nullptr);
-            node.setProperty ("yaw", actor.yawDegrees, nullptr);
+            node.setProperty ("facing", actor.facingDegrees, nullptr);
             node.setProperty ("scale", actor.scale, nullptr);
             state.addChild (node, -1, nullptr);
         }
@@ -126,6 +153,12 @@ void SceneModel::fromValueTree (const juce::ValueTree& state)
     if (! state.hasType ("SCENE"))
         return;
 
+    /* Legacy SCENE nodes (no facingConvention marker) stored the old
+       visual yaw, where 0 pointed to +y and 180 to the front wall. The
+       current scale is a standard azimuth, so convert by subtracting
+       180 degrees: 0 -> back wall, 180 -> front wall. */
+    const bool legacyFacing = (int) state.getProperty ("facingConvention", 0) < 1;
+
     /* The node always carries the complete marker list, so replace the
        current one instead of appending a second copy. */
     markers.clear();
@@ -144,7 +177,10 @@ void SceneModel::fromValueTree (const juce::ValueTree& state)
             auto& actor = at (isReceiver, index);
             actor.kind = actorKindFromString (child.getProperty ("kind").toString(), actor.kind);
             actor.name = child.getProperty ("name").toString();
-            actor.yawDegrees = (float) (double) child.getProperty ("yaw", 0.0);
+            const float storedFacing = (float) (double) child.getProperty (
+                legacyFacing ? "yaw" : "facing", 0.0);
+            actor.facingDegrees = legacyFacing ? wrapFacingDegrees (storedFacing - 180.0f)
+                                               : wrapFacingDegrees (storedFacing);
             actor.scale = juce::jlimit (0.25f, 3.0f,
                                         (float) (double) child.getProperty ("scale", 1.0));
         }
