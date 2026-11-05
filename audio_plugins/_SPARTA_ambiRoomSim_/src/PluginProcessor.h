@@ -1,22 +1,22 @@
 /*
  ==============================================================================
- 
+
  This file is part of SPARTA; a suite of spatial audio plug-ins.
  Copyright (c) 2018 - Leo McCormack.
- 
+
  SPARTA is free software: you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
  the Free Software Foundation, either version 3 of the License, or
  (at your option) any later version.
- 
+
  SPARTA is distributed in the hope that it will be useful,
  but WITHOUT ANY WARRANTY; without even the implied warranty of
  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  GNU General Public License for more details.
- 
+
  You should have received a copy of the GNU General Public License
  along with SPARTA.  If not, see <http://www.gnu.org/licenses/>.
- 
+
  ==============================================================================
 */
 
@@ -28,6 +28,7 @@
 #include "ambi_roomsim.h"
 #include "pathAutomation.h"
 #include "waveformCapture.h"
+#include "ui/SceneModel.h"
 #include <thread>
 #include <atomic>
 #include <array>
@@ -77,14 +78,14 @@ public:
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
-    
+
     /* PluginEditor */
     juce::AudioProcessorEditor* createEditor() override;
-    
+
     /* Get functions */
     void* getFXHandle() { return hAmbi; }
-    
-    /* For refreshing window during automation */ 
+
+    /* For refreshing window during automation */
     void setRefreshWindow(bool newState) { refreshWindow = newState; }
     bool getRefreshWindow() { return refreshWindow; }
 
@@ -116,6 +117,50 @@ public:
         pathEditCounter.fetch_add(1, std::memory_order_release);
     }
     double getCurrentHostTime() const { return currentHostTime.load(); }
+    bool isHostPlaying() const { return hostPlaying.load(); }
+
+    /* Scene metadata (actor casting, names, markers, view preferences).
+       The audio thread never reads the SceneModel itself: the receiver
+       facing angles are published into lock-free atomics by
+       syncReceiverFacingFromScene(), which is called after every scene
+       edit. The version guard mirrors the path-bank guard so a stale host
+       snapshot cannot overwrite newer in-memory edits. */
+    studio::SceneModel& getSceneModel() { return sceneModel; }
+    const studio::SceneModel& getSceneModel() const { return sceneModel; }
+    juce::CriticalSection& getSceneLock() { return sceneLock; }
+    int getSceneStateVersion() const { return sceneStateVersion.load(); }
+    void markSceneDirty(bool notifyHost = true) {
+        sceneStateVersion.fetch_add(1, std::memory_order_release);
+        /* The receiver facing is part of the audible state, so publish it
+           whenever the scene changes. sceneLock is recursive, so callers
+           that already hold it are fine. */
+        syncReceiverFacingFromScene();
+        if (notifyHost)
+            updateHostDisplay(juce::AudioProcessorListener::ChangeDetails{}
+                                  .withNonParameterStateChanged(true));
+    }
+
+    /* Listener facing. Each receiver's facing is a standard azimuth:
+       0 faces the front wall (-y), +90 faces +x (left) and +/-180 faces
+       the back wall (+y). It is not just visual: processBlock() rotates
+       that receiver's Ambisonic output by (90 - facing) degrees so the
+       drawn arrow always points at the decoder's front (+x). Turning the
+       listener therefore turns the whole sound field around it; facing
+       +90 (pointing at +x) is the no-rotation reference. */
+    void setReceiverFacingDegrees(int index, float degrees);
+    float getReceiverFacingDegrees(int index) const;
+    void syncReceiverFacingFromScene();
+
+    /* Editor undo/redo. A snapshot contains the parameter values, the path
+       bank and the scene metadata, i.e. everything the studio UI can edit.
+       The audio-thread snapshot and the receiver facing are refreshed by
+       restoreEditorState(), so an undo is audible immediately. */
+    juce::ValueTree captureEditorState();
+    void restoreEditorState(const juce::ValueTree& state);
+    /* Incremented whenever the host pushes a state (session load, host undo,
+       template). The editor uses it to drop its undo history rather than
+       undoing across an external state change. */
+    int getStateRestoreCounter() const { return stateRestoreCounter.load(); }
 
     /* True when the host position is expressed in PPQ (bars) rather than in
        seconds. The GUI labels the time fields accordingly. */
@@ -156,11 +201,11 @@ public:
     bool isTrackLoading() const { return trackLoading.load(); }
     void loadTrackFile(const juce::File& file);
     void clearTrackFile();
-    
+
     /* Hide internal setParameterValue when automation is pushing (to suppress parameterChanged re-entry) */
     void setApplyingFromAutomation(bool v) { applyingFromAutomation.store(v); }
     bool isApplyingFromAutomation() const { return applyingFromAutomation.load(); }
-    
+
 private:
     void* hAmbi;                       /* ambi_roomsim handle */
     bool refreshWindow;
@@ -182,9 +227,17 @@ private:
     PathBank pathSnapshot;
     uint32_t pathSnapshotCounter = 0;    /* audio thread only */
     mutable std::atomic<double> currentHostTime{0.0};
+    mutable std::atomic<bool> hostPlaying{false};
     mutable std::atomic<double> maxHostTime{0.0};
     std::atomic<bool> applyingFromAutomation{false};
     double lastWaveHostTime = 0.0;
+
+    /* Scene metadata (see getSceneModel). Guarded by sceneLock because the
+       host may save/restore state from a different thread than the editor. */
+    studio::SceneModel sceneModel;
+    juce::CriticalSection sceneLock;
+    std::atomic<int> sceneStateVersion{0};
+    std::atomic<int> stateRestoreCounter{0};
 
     /* Cached pointers to the position parameters that mirror the path-driven
        object positions. They are looked up once (building juce::Strings per
@@ -197,6 +250,20 @@ private:
     std::array<PositionParams, ROOM_SIM_MAX_NUM_SOURCES> sourceParams;
     std::array<PositionParams, ROOM_SIM_MAX_NUM_RECEIVERS> receiverParams;
     void cachePositionParameters();
+
+    /* Receiver facing -> Ambisonic rotation. The azimuth values are written
+       by the message thread (scene edits) and read by the audio thread
+       without a lock. The rotation matrices are audio-thread-owned;
+       prepareToPlay() allocates the maximum size up-front so an
+       output-order change never has to allocate while processing. */
+    std::array<std::atomic<float>, ROOM_SIM_MAX_NUM_RECEIVERS> receiverFacingDeg;
+    std::array<float, ROOM_SIM_MAX_NUM_RECEIVERS> receiverRotationAngle {};
+    std::array<float, ROOM_SIM_MAX_NUM_RECEIVERS> receiverRotationApplied {};
+    std::array<std::vector<float>, ROOM_SIM_MAX_NUM_RECEIVERS> receiverRotationMtx;
+    int receiverRotationNSH = 0;
+    int receiverRotationOrder = 0;
+    void updateReceiverRotationMatrices (int numSamples);
+    void applyReceiverRotations (float* const* outFrame, int numOuts, int frameSize);
 
     /* Waveform capture of the mono input mix (see waveformCapture.h). */
     WaveformCapture waveformCapture;
@@ -229,7 +296,7 @@ private:
     /* Diagnostic: traces path-bank serialization to a file when the
        SPARTA_AMB_ROOMSIM_STATE_LOG env var points at a log path. */
     void logPathState(const char* where) const;
-    
+
     /* For syncing parameter values between the JUCE parameter tree and the internal DSP object */
     void setParameterValuesUsingInternalState();
     void setInternalStateUsingParameterValues();

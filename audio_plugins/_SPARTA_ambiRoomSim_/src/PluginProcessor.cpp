@@ -1,27 +1,29 @@
 /*
  ==============================================================================
- 
+
  This file is part of SPARTA; a suite of spatial audio plug-ins.
  Copyright (c) 2018 - Leo McCormack.
- 
+
  SPARTA is free software: you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
  the Free Software Foundation, either version 3 of the License, or
  (at your option) any later version.
- 
+
  SPARTA is distributed in the hope that it will be useful,
  but WITHOUT ANY WARRANTY; without even the implied warranty of
  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  GNU General Public License for more details.
- 
+
  You should have received a copy of the GNU General Public License
  along with SPARTA.  If not, see <http://www.gnu.org/licenses/>.
- 
+
  ==============================================================================
 */
 
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+
+#include "saf.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -71,10 +73,23 @@ void PluginProcessor::logPathState(const char* where) const
     std::fclose(f);
 }
 
+/* Index of a parameter in the AudioProcessor's flat parameter list. Hosts
+   address automation by this index, so it is the thing that must stay stable
+   across releases (see the deprecated pathEnable/pathLoop dummies below). */
+static int parameterIndexOf (const juce::AudioProcessor& processor,
+                             juce::AudioProcessorValueTreeState& state,
+                             const juce::String& parameterID)
+{
+    if (auto* parameter = state.getParameter (parameterID))
+        return processor.getParameters().indexOf (parameter);
+
+    return -1;
+}
+
 static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
-    
+
     params.push_back(std::make_unique<juce::AudioParameterChoice>("outputOrder", "OutputOrder",
                                                                   juce::StringArray{"1st order","2nd order","3rd order","4th order","5th order","6th order","7th order","8th order","9th order","10th order"}, 2,
                                                                   AudioParameterChoiceAttributes().withAutomatable(false)));
@@ -104,6 +119,17 @@ static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
                                                                AudioParameterIntAttributes().withAutomatable(false)));
     params.push_back(std::make_unique<juce::AudioParameterInt>("numReceivers", "NumReceivers", 1, ROOM_SIM_MAX_NUM_RECEIVERS, ambi_roomsim_defaultNumReceivers,
                                                                AudioParameterIntAttributes().withAutomatable(false)));
+    /* Deprecated, inert parameters. They were removed when the per-path
+       `enabled`/`loop` flags replaced the global automation gate, but hosts
+       address parameters by *index*: dropping them shifted every following
+       parameter by two slots and broke automation and old sessions saved by
+       1.8.x. Keep them in their original positions (between numReceivers and
+       pathTimeOffset) so the layout stays byte-for-byte compatible. Nothing
+       reads them; parameterChanged() ignores them on purpose. */
+    params.push_back(std::make_unique<juce::AudioParameterBool>("pathEnable", "PathEnable", false,
+                                                                 AudioParameterBoolAttributes().withAutomatable(false)));
+    params.push_back(std::make_unique<juce::AudioParameterBool>("pathLoop", "PathLoop", false,
+                                                                AudioParameterBoolAttributes().withAutomatable(false)));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("pathTimeOffset", "PathTimeOffset",
                                                                  juce::NormalisableRange<float>(-3600.0f, 3600.0f, 0.01f), 0.0f,
                                                                  AudioParameterFloatAttributes().withAutomatable(false)));
@@ -115,7 +141,7 @@ static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
         params.push_back(std::make_unique<juce::AudioParameterFloat>("sourceY" + juce::String(i), "SourceY_" + juce::String(i+1), juce::NormalisableRange<float>(0.0f, 20.0f, 0.01f), ambi_roomsim_defaultSourcePositions[i][1], AudioParameterFloatAttributes().withLabel("m")));
         params.push_back(std::make_unique<juce::AudioParameterFloat>("sourceZ" + juce::String(i), "SourceZ_" + juce::String(i+1), juce::NormalisableRange<float>(0.0f, 6.0f, 0.01f), ambi_roomsim_defaultSourcePositions[i][2], AudioParameterFloatAttributes().withLabel("m")));
     }
-    
+
     for(int i=0; i<ROOM_SIM_MAX_NUM_RECEIVERS; i++){
         params.push_back(std::make_unique<juce::AudioParameterFloat>("receiverX" + juce::String(i), "ReceiverX_" + juce::String(i+1), juce::NormalisableRange<float>(0.0f, 20.0f, 0.01f), ambi_roomsim_defaultReceiverPositions[i][0], AudioParameterFloatAttributes().withLabel("m")));
         params.push_back(std::make_unique<juce::AudioParameterFloat>("receiverY" + juce::String(i), "ReceiverY_" + juce::String(i+1), juce::NormalisableRange<float>(0.0f, 20.0f, 0.01f), ambi_roomsim_defaultReceiverPositions[i][1], AudioParameterFloatAttributes().withLabel("m")));
@@ -168,7 +194,7 @@ void PluginProcessor::parameterChanged(const juce::String& parameterID, float ne
     }
     else if(parameterID == "roomZ"){
         ambi_roomsim_setRoomDimZ(hAmbi, newValue);
-    } 
+    }
     else if(parameterID == "numSources"){
         ambi_roomsim_setNumSources(hAmbi, static_cast<int>(newValue));
     }
@@ -292,9 +318,25 @@ PluginProcessor::PluginProcessor()
 {
     ambi_roomsim_create(&hAmbi);
     addParameterListeners(this);
-    
+
+    /* Automation compatibility contract with 1.8.x. Hosts address
+       parameters by index, not by ID, so the two deprecated dummies must
+       keep their original slots. If this ever fires, an old session's
+       automation will be mapped onto the wrong parameters. */
+    jassert (parameterIndexOf (*this, parameters, "pathEnable") == 16);
+    jassert (parameterIndexOf (*this, parameters, "pathLoop") == 17);
+    jassert (parameterIndexOf (*this, parameters, "sourceX0") == 20);
+
     trackFormatManager.registerBasicFormats();
     cachePositionParameters();
+
+    /* Receiver facing defaults to 0 degrees, facing the room's front wall
+       (see SceneModel::reset). Publish the scene values so the audio thread
+       has a valid snapshot before the first block. */
+    for (auto& facing : receiverFacingDeg)
+        facing.store(0.0f, std::memory_order_relaxed);
+    syncReceiverFacingFromScene();
+
     /* Reserve the keyframe buffers of both the live bank and the snapshot
        that the audio thread uses, so that the copy it makes whenever a path
        is edited never has to allocate memory on the audio thread. */
@@ -339,7 +381,7 @@ void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 
     ambi_roomsim_init(hAmbi, nSampleRate);
     AudioProcessor::setLatencySamples(ambi_roomsim_getProcessingDelay());
-    
+
     waveformCapture.prepare(nSampleRate);
     /* The scratch buffer for the mono mix is a little larger than the
        announced block size, so that a host that hands us a bigger block
@@ -349,6 +391,18 @@ void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     if(!blockAdapter)
         blockAdapter = std::make_unique<BlockAdapter>();
     blockAdapter->configure(ambi_roomsim_getFrameSize(), nNumInputs, nNumOutputs, nHostBlockSize);
+
+    /* Allocate the largest possible SH rotation matrices up-front (10th
+       order: 121 x 121) so that changing the output order never allocates
+       on the audio thread. Only the first nSH x nSH entries are used. */
+    for (auto& matrix : receiverRotationMtx)
+        matrix.assign (121u * 121u, 0.0f);
+    for (auto& angle : receiverRotationAngle)
+        angle = 0.0f;
+    for (auto& applied : receiverRotationApplied)
+        applied = 1.0e9f;
+    receiverRotationNSH = 0;
+    receiverRotationOrder = 0;
 }
 
 void PluginProcessor::processBlock (AudioSampleBuffer& buffer, MidiBuffer& /*midiMessages*/)
@@ -363,6 +417,7 @@ void PluginProcessor::processBlock (AudioSampleBuffer& buffer, MidiBuffer& /*mid
             t = (getParameterChoice("pathTimeMode") == 0)
                     ? pos->getTimeInSeconds().orFallback(0.0)
                     : pos->getPpqPosition().orFallback(0.0);
+            hostPlaying.store (pos->getIsPlaying());
         }
     }
     t += getParameterFloat("pathTimeOffset");
@@ -412,8 +467,13 @@ void PluginProcessor::processBlock (AudioSampleBuffer& buffer, MidiBuffer& /*mid
     for (int i = 0; i < numRec; ++i)
         applyPath(i, pathSnapshot.getReceiverPath(i), t, true);
 
+    /* Update the receiver-facing rotation once per host block; the same
+       matrices are then applied to every processing frame in the block. */
+    updateReceiverRotationMatrices (buffer.getNumSamples());
+
     blockAdapter->processBlock (buffer, [this] (const float* const* inFrame, float* const* outFrame, int numIns, int numOuts, int frameSize) {
             ambi_roomsim_process(hAmbi, inFrame, outFrame, numIns, numOuts, frameSize);
+            applyReceiverRotations (outFrame, numOuts, frameSize);
         });
 }
 
@@ -465,18 +525,309 @@ void PluginProcessor::applyPath(int index, const PathData& path, double t, bool 
     if (pp.z != nullptr) pp.z->setValue(pp.z->convertTo0to1(z));
 }
 
+void PluginProcessor::setReceiverFacingDegrees (int index, float degrees)
+{
+    if (index < 0 || index >= ROOM_SIM_MAX_NUM_RECEIVERS)
+        return;
+    receiverFacingDeg[(size_t) index].store (degrees, std::memory_order_relaxed);
+}
+
+float PluginProcessor::getReceiverFacingDegrees (int index) const
+{
+    if (index < 0 || index >= ROOM_SIM_MAX_NUM_RECEIVERS)
+        return 0.0f;
+    return receiverFacingDeg[(size_t) index].load (std::memory_order_relaxed);
+}
+
+void PluginProcessor::syncReceiverFacingFromScene()
+{
+    /* Called on the message thread after every scene edit. The audio thread
+       never touches the SceneModel; it only reads the atomics below. */
+    const juce::ScopedLock sl (sceneLock);
+    for (int i = 0; i < ROOM_SIM_MAX_NUM_RECEIVERS; ++i)
+        receiverFacingDeg[(size_t) i].store (sceneModel.getActor (true, i).facingDegrees,
+                                             std::memory_order_relaxed);
+}
+
+void PluginProcessor::updateReceiverRotationMatrices (int numSamples)
+{
+    const int order = juce::jlimit (1, MAX_SH_ORDER, ambi_roomsim_getOutputOrder (hAmbi));
+    const int nSH = (order + 1) * (order + 1);
+
+    if (nSH != receiverRotationNSH)
+    {
+        receiverRotationNSH = nSH;
+        receiverRotationOrder = order;
+
+        for (auto& matrix : receiverRotationMtx)
+            if (matrix.size() < (size_t) nSH * (size_t) nSH)
+                matrix.assign ((size_t) nSH * (size_t) nSH, 0.0f);
+
+        /* Force a recompute for every receiver after an order change. */
+        for (auto& applied : receiverRotationApplied)
+            applied = 1.0e9f;
+    }
+
+    const float sampleRate = (float) juce::jmax (1, nSampleRate);
+    const float coefficient = 1.0f - std::exp (-(float) juce::jmax (1, numSamples)
+                                                / (sampleRate * 0.02f));
+
+    for (int i = 0; i < ROOM_SIM_MAX_NUM_RECEIVERS; ++i)
+    {
+        /* The studio's listener arrow points along (sin(az), -cos(az)) for
+           the standard azimuth az: 0 faces the front wall (-y), +90 faces
+           +x (left) and +/-180 faces the back wall (+y). The Ambisonic
+           convention used by SAF/SOFA decoders is +x = front, +y = left,
+           so the field must be rotated by (90 - az) to put the arrow
+           direction on the decoder's front axis:
+               az    0      ->  +90 deg
+               az   90      ->    0 deg (facing +x; no rotation)
+               az  +/-180   ->  -90 deg
+               az  -90      -> +180 deg
+           Wrap the target into [-180, 180) so dragging the Facing slider
+           across +/-180 degrees does not spin the scene all the way
+           around. */
+        float targetDegrees = 90.0f - receiverFacingDeg[(size_t) i].load (std::memory_order_relaxed);
+        targetDegrees = std::fmod (targetDegrees + 180.0f, 360.0f);
+        if (targetDegrees < 0.0f)
+            targetDegrees += 360.0f;
+        targetDegrees -= 180.0f;
+
+        const float target = juce::degreesToRadians (targetDegrees);
+        float current = receiverRotationAngle[(size_t) i];
+
+        if (receiverRotationApplied[(size_t) i] > 1.0e8f)
+        {
+            /* First block after prepareToPlay() or an order change: start
+               at the target instead of audibly gliding the field into
+               place. */
+            current = target;
+        }
+        else
+        {
+            float delta = target - current;
+
+            /* Shortest way around the circle. */
+            delta = std::fmod (delta + juce::MathConstants<float>::pi,
+                               2.0f * juce::MathConstants<float>::pi);
+            if (delta < 0.0f)
+                delta += 2.0f * juce::MathConstants<float>::pi;
+            delta -= juce::MathConstants<float>::pi;
+
+            if (std::abs (delta) < 1.0e-4f)
+                current = target;
+            else
+                current += delta * coefficient;
+        }
+
+        receiverRotationAngle[(size_t) i] = current;
+
+        if (std::abs (current - receiverRotationApplied[(size_t) i]) > 1.0e-4f)
+        {
+            const float c = std::cos (current);
+            const float s = std::sin (current);
+            float R[3][3] = { {  c, -s, 0.0f },
+                              {  s,  c, 0.0f },
+                              { 0.0f, 0.0f, 1.0f } };
+            getSHrotMtxReal (R, receiverRotationMtx[(size_t) i].data(), order);
+            receiverRotationApplied[(size_t) i] = current;
+        }
+    }
+}
+
+void PluginProcessor::applyReceiverRotations (float* const* outFrame, int numOuts,
+                                              int frameSize)
+{
+    if (receiverRotationNSH <= 1 || receiverRotationOrder < 1 || outFrame == nullptr)
+        return;
+
+    const int nSH = receiverRotationNSH;
+    const int order = receiverRotationOrder;
+    const int numReceivers = juce::jmin (ROOM_SIM_MAX_NUM_RECEIVERS,
+                                         ambi_roomsim_getNumReceivers (hAmbi));
+    const bool fuma = ambi_roomsim_getChOrder (hAmbi) == 2; /* CH_FUMA */
+    static constexpr int acnToFuma[4] = { 0, 2, 3, 1 };
+
+    for (int rec = 0; rec < numReceivers; ++rec)
+    {
+        if (std::abs (receiverRotationAngle[(size_t) rec]) < 1.0e-5f)
+            continue;
+
+        const int base = rec * nSH;
+        if (base >= numOuts)
+            break;
+        const int available = juce::jmin (nSH, numOuts - base);
+        const float* matrix = receiverRotationMtx[(size_t) rec].data();
+
+        /* The SH rotation matrix is block-diagonal by order, so only the
+           (2l+1)^2 block of each order has to be multiplied. */
+        for (int l = 1; l <= order; ++l)
+        {
+            const int start = l * l;
+            const int size = 2 * l + 1;
+            if (start + size > available)
+                break;
+
+            for (int sample = 0; sample < frameSize; ++sample)
+            {
+                float input[21];
+                float output[21];
+
+                for (int j = 0; j < size; ++j)
+                {
+                    /* input[] is in ACN order for the matrix multiply; when
+                       the host buffer uses FuMa, fetch each ACN coefficient
+                       from its FuMa channel instead. */
+                    const int channel = start + j;
+                    const int source = fuma && channel < 4 ? acnToFuma[channel] : channel;
+                    input[j] = outFrame[base + source][sample];
+                }
+
+                for (int i = 0; i < size; ++i)
+                {
+                    const float* row = matrix + (size_t) (start + i) * (size_t) nSH
+                                                + (size_t) start;
+                    float sum = 0.0f;
+                    for (int j = 0; j < size; ++j)
+                        sum += row[j] * input[j];
+                    output[i] = sum;
+                }
+
+                for (int i = 0; i < size; ++i)
+                {
+                    const int channel = start + i;
+                    const int destination = fuma && channel < 4 ? acnToFuma[channel] : channel;
+                    outFrame[base + destination][sample] = output[i];
+                }
+            }
+        }
+    }
+}
+
 AudioProcessorEditor* PluginProcessor::createEditor()
 {
     return new PluginEditor (*this);
 }
 
+juce::ValueTree PluginProcessor::captureEditorState()
+{
+    juce::ValueTree state("EDITOR_STATE");
+
+    {
+        const juce::SpinLock::ScopedLockType sl(pathLock);
+        state.addChild(pathBank.toValueTree(0), -1, nullptr);
+    }
+
+    {
+        const juce::ScopedLock sl(sceneLock);
+        auto sceneState = sceneModel.toValueTree(0);
+
+        /* View preferences (grid, labels, font size) are not document edits:
+           keep them out of undo snapshots so undoing a scene edit never
+           changes the UI setup. restoreEditorState() leaves them untouched. */
+        while (sceneState.getChildWithName("UI").isValid())
+            sceneState.removeChild(sceneState.getChildWithName("UI"), nullptr);
+
+        state.addChild(sceneState, -1, nullptr);
+    }
+
+    auto parameterState = parameters.copyState();
+
+    /* setStateInformation() replaces the APVTS state with the whole host
+       tree, whose root is AMBIROOMSIMPLUGINSETTINGS rather than the usual
+       "Parameters" node. Normalise the type so snapshots captured before
+       and after a host restore remain interchangeable. */
+    if (! parameterState.hasType("Parameters"))
+    {
+        juce::ValueTree normalized("Parameters");
+        for (int i = 0; i < parameterState.getNumChildren(); ++i)
+            normalized.addChild(parameterState.getChild(i).createCopy(), -1, nullptr);
+        parameterState = normalized;
+    }
+
+    /* These two are serialized separately by getStateInformation() and must
+       never travel inside the APVTS tree (see setStateInformation). */
+    while (parameterState.getChildWithName("PATHS").isValid())
+        parameterState.removeChild(parameterState.getChildWithName("PATHS"), nullptr);
+    while (parameterState.getChildWithName("SCENE").isValid())
+        parameterState.removeChild(parameterState.getChildWithName("SCENE"), nullptr);
+
+    state.addChild(parameterState, -1, nullptr);
+    return state;
+}
+
+void PluginProcessor::restoreEditorState(const juce::ValueTree& state)
+{
+    if (! state.hasType("EDITOR_STATE"))
+        return;
+
+    /* Restore the parameters one by one through setParameterValue() so the
+       host is notified of every changed value (replaceState() would update
+       the tree silently) and parameterChanged() updates the DSP. */
+    auto parameterState = state.getChildWithName("Parameters");
+    if (! parameterState.isValid())
+        parameterState = state.getChildWithName("AMBIROOMSIMPLUGINSETTINGS");
+
+    if (parameterState.isValid())
+    {
+        for (int i = 0; i < parameterState.getNumChildren(); ++i)
+        {
+            const auto child = parameterState.getChild(i);
+            if (! child.hasProperty("id") || ! child.hasProperty("value"))
+                continue;
+
+            setParameterValue(child.getProperty("id").toString(),
+                              (float) (double) child.getProperty("value"));
+        }
+
+        setInternalStateUsingParameterValues();
+    }
+
+    const auto paths = state.getChildWithName("PATHS");
+    if (paths.isValid())
+    {
+        {
+            const juce::SpinLock::ScopedLockType sl(pathLock);
+            pathBank.fromValueTree(paths);
+
+            int maxKf = 0;
+            for (int i = 0; i < ROOM_SIM_MAX_NUM_SOURCES; ++i)
+                maxKf = jmax(maxKf, (int) pathBank.getSourcePath(i).keyframes.size());
+            for (int i = 0; i < ROOM_SIM_MAX_NUM_RECEIVERS; ++i)
+                maxKf = jmax(maxKf, (int) pathBank.getReceiverPath(i).keyframes.size());
+            pathSnapshot.reserveKeyframeCapacity(maxKf);
+        }
+
+        /* Bumps the edit counter (audio thread picks up the restored bank)
+           and the state version (a stale host snapshot cannot overwrite the
+           undo). The host is notified once, at the end. */
+        markPathDirty(false);
+    }
+
+    const auto scene = state.getChildWithName("SCENE");
+    if (scene.isValid())
+    {
+        {
+            const juce::ScopedLock sl(sceneLock);
+            sceneModel.fromValueTree(scene);
+        }
+
+        markSceneDirty(false);
+    }
+
+    updateHostDisplay(juce::AudioProcessorListener::ChangeDetails{}
+                          .withParameterInfoChanged(true)
+                          .withNonParameterStateChanged(true));
+}
 void PluginProcessor::getStateInformation (MemoryBlock& destData)
 {
     juce::ValueTree state = parameters.copyState();
-    /* Remove any PATHS children that may have leaked into the parameter tree
-       from an earlier setStateInformation (see setStateInformation). */
+    /* Remove any PATHS/SCENE children that may have leaked into the
+       parameter tree from an earlier setStateInformation (see below). */
     while (state.getChildWithName("PATHS").isValid())
         state.removeChild(state.getChildWithName("PATHS"), nullptr);
+    while (state.getChildWithName("SCENE").isValid())
+        state.removeChild(state.getChildWithName("SCENE"), nullptr);
 
     /* The audio thread copies pathBank into pathSnapshot under pathLock, so
        the live bank must be serialized under the same lock to avoid a data
@@ -485,6 +836,12 @@ void PluginProcessor::getStateInformation (MemoryBlock& destData)
         const juce::SpinLock::ScopedLockType sl(pathLock);
         state.addChild(pathBank.toValueTree(pathStateVersion.load()), -1, nullptr);
         logPathState("save");
+    }
+
+    /* Scene casting / markers / view preferences. */
+    {
+        const juce::ScopedLock sl(sceneLock);
+        state.addChild(sceneModel.toValueTree(sceneStateVersion.load()), -1, nullptr);
     }
 
     std::unique_ptr<juce::XmlElement> xmlState(state.createXml());
@@ -539,14 +896,14 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
                 ambi_roomsim_setNumSources(hAmbi, xmlState->getIntAttribute("nSources", 1));
             if(xmlState->hasAttribute("nReceivers"))
                 ambi_roomsim_setNumReceivers(hAmbi, xmlState->getIntAttribute("nReceivers", 1));
-            
+
             if(xmlState->hasAttribute("NORM"))
                 ambi_roomsim_setNormType(hAmbi, xmlState->getIntAttribute("NORM", 1));
             if(xmlState->hasAttribute("CHORDER"))
                 ambi_roomsim_setChOrder(hAmbi, xmlState->getIntAttribute("CHORDER", 1));
             if(xmlState->hasAttribute("OUT_ORDER"))
                 ambi_roomsim_setOutputOrder(hAmbi, xmlState->getIntAttribute("OUT_ORDER", 1));
-            
+
             setParameterValuesUsingInternalState();
         }
         else if (xmlState->getIntAttribute("VersionCode")>=0x10101){
@@ -572,19 +929,28 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
                            > (int)incomingPaths.getProperty("version", 0))
                     incomingPaths = child;
             }
-            state.removeChild(incomingPaths, nullptr);
-            // Strip legacy dead params (pathEnable / pathLoop) removed in fix
-            for (int i = state.getNumChildren(); i-- > 0; ) {
-                auto c = state.getChild(i);
-                if (c.hasProperty("id")) {
-                    auto id = c.getProperty("id").toString();
-                    if (id == "pathEnable" || id == "pathLoop")
-                        state.removeChild(c, nullptr);
-                }
+            /* Remove every stacked PATHS node, not just the one we keep:
+               none of them may end up in the parameter tree below. */
+            while (state.getChildWithName("PATHS").isValid())
+                state.removeChild(state.getChildWithName("PATHS"), nullptr);
+
+            /* Scene metadata is UI-only and lives outside the parameter tree
+               for the same reason as PATHS. Remove every stacked SCENE node
+               and keep the newest one. */
+            juce::ValueTree incomingScene;
+            for (int i = 0; i < state.getNumChildren(); ++i) {
+                auto child = state.getChild(i);
+                if (!child.hasType("SCENE")) continue;
+                if (!incomingScene.isValid()
+                    || (int)child.getProperty("version", 0)
+                           > (int)incomingScene.getProperty("version", 0))
+                    incomingScene = child;
             }
+            while (state.getChildWithName("SCENE").isValid())
+                state.removeChild(state.getChildWithName("SCENE"), nullptr);
             parameters.replaceState(state);
             addParameterListeners(this);
-            
+
             /* Many hosts will also trigger parameterChanged() for all parameters after calling setStateInformation() */
             /* However, some hosts do not. Therefore, it is better to ensure that the internal state is always up-to-date by calling: */
             setInternalStateUsingParameterValues();
@@ -627,6 +993,22 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
                 if (applied)
                     refreshPathSnapshot();
             }
+
+            /* Restore scene casting / markers / view preferences. The same
+               monotonic version guard as PATHS keeps a stale host snapshot
+               (undo/template) from overwriting newer edits. */
+            if (incomingScene.isValid()) {
+                const juce::ScopedLock sl(sceneLock);
+                const int incomingVersion = (int)incomingScene.getProperty("version", 0);
+                if (incomingVersion >= sceneStateVersion.load()) {
+                    sceneModel.fromValueTree(incomingScene);
+                    sceneStateVersion.store(incomingVersion);
+                }
+            }
+
+            /* The facing angles are part of the restored scene; publish them
+               so the next audio block rotates the receivers correctly. */
+            syncReceiverFacingFromScene();
         }
 
         /* Restore the reference track on initialization: kick off a decode
@@ -635,8 +1017,9 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
         juce::String trackPath = xmlState->getStringAttribute("TrackFilePath", "");
         if (trackPath.isNotEmpty())
             loadTrackFile(juce::File(trackPath));
-    
+
         ambi_roomsim_refreshParams(hAmbi);
+        stateRestoreCounter.fetch_add(1, std::memory_order_release);
     }
 }
 

@@ -50,6 +50,24 @@ PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/RoomSettingsView.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/PathEditView.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/PathEditView.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/StudioTheme.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/StudioLookAndFeel.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/Mesh3D.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/ActorLibrary.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/ActorLibrary.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/SceneModel.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/SceneModel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/SelectionState.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/SceneRenderer.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/SceneRenderer.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/Viewport3D.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/Viewport3D.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/InspectorPanel.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/InspectorPanel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/SourceBar.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/SourceBar.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/StudioShell.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/StudioShell.cpp
 )
 
 # Add any extra JUCE-specific pre-processor definitions
@@ -65,10 +83,17 @@ PUBLIC
 target_link_libraries(${PROJECT_NAME} 
 PRIVATE 
     saf_example_ambi_roomsim
+    saf
     GUI_fonts
     juce::juce_recommended_config_flags
     juce::juce_audio_plugin_client
     juce::juce_audio_utils
+)
+
+# Receiver facing rotates the Ambisonic output with getSHrotMtxReal().
+target_include_directories(${PROJECT_NAME}
+PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../SDKs/Spatial_Audio_Framework/framework/include
 )
 
 # The JUCE OpenGL module seems to have some issues on Linux...
