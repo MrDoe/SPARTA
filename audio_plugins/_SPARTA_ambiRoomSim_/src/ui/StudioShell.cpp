@@ -863,7 +863,11 @@ void StudioShell::updateWarning()
         warning = Warning::inputChannels;
     else if (processor.getCurrentNumOutputs() < ambi_roomsim_getNSHrequired (hAmbi))
         warning = Warning::outputChannels;
-    else if (processor.getCurrentBlockSize() != ambi_roomsim_getFrameSize())
+    /* Compare divisibility rather than exact equality: LV2 hosts such as
+       Ardour advertise a large maximum block length (8192) while running
+       much smaller cycles. Multiples of the processing frame are handled
+       by BlockAdapter without extra buffering, so they are not a problem. */
+    else if (processor.getCurrentBlockSize() % ambi_roomsim_getFrameSize() != 0)
         warning = Warning::frameSize;
 
     if (warning == currentWarning)
